@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Local data (never commit)
+data/
+*.db
+*.sqlite*
+secret.key
+tls/
+*.pem
+*.crt
+*.key
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-private (not part of source)
+4G USB DONGLE A7670X/
+.kiro/specs/sms-gateway-a7670x/.cache/

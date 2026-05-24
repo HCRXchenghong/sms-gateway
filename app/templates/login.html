@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}登录 · SMS Gateway{% endblock %}
+{% block content %}
+<div class="card narrow">
+    <h1>SMS Gateway 登录</h1>
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+    <form method="post" action="/login" id="login-form">
+        <label>账号
+            <input type="text" name="username" autocomplete="username" required>
+        </label>
+        <label>密码
+            <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <div id="totp-block">
+            <label>验证码（Microsoft Authenticator 等 6 位 TOTP）
+                <input type="text" name="code" inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code">
+            </label>
+            <a href="#" id="use-recovery" class="link">改用恢复码</a>
+        </div>
+        <div id="recovery-block" style="display:none;">
+            <label>恢复码
+                <input type="text" name="recovery" autocomplete="off">
+            </label>
+            <a href="#" id="use-totp" class="link">改用 TOTP 验证码</a>
+        </div>
+        <button type="submit" class="primary">登录</button>
+    </form>
+</div>
+<script>
+document.getElementById('use-recovery').addEventListener('click', function(e){
+    e.preventDefault();
+    document.getElementById('totp-block').style.display = 'none';
+    document.getElementById('recovery-block').style.display = '';
+    document.querySelector('input[name=code]').value = '';
+});
+document.getElementById('use-totp').addEventListener('click', function(e){
+    e.preventDefault();
+    document.getElementById('totp-block').style.display = '';
+    document.getElementById('recovery-block').style.display = 'none';
+    document.querySelector('input[name=recovery]').value = '';
+});
+</script>
+{% endblock %}

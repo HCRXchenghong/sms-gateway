@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}短信中心 · SMS Gateway{% endblock %}
+{% block content %}
+<header class="topbar">
+    <div class="title">SMS Gateway</div>
+    <div class="user">
+        <span>{{ user.username }}</span>
+        <span id="modem-status" class="status-pill">●</span>
+        <form method="post" action="/logout" style="display:inline;">
+            <button class="link" type="submit">退出</button>
+        </form>
+    </div>
+</header>
+
+<nav class="tabs">
+    <a class="tab active" data-tab="inbox">收件箱</a>
+    <a class="tab" data-tab="send">发送</a>
+    <a class="tab" data-tab="outbox">发件箱</a>
+    <a class="tab" data-tab="keys">API Keys</a>
+</nav>
+
+<section id="tab-inbox" class="panel active">
+    <h2>收件箱（实时更新）</h2>
+    <table class="msglist" id="inbox-table">
+        <thead><tr><th>时间</th><th>发件人</th><th>内容</th></tr></thead>
+        <tbody></tbody>
+    </table>
+</section>
+
+<section id="tab-send" class="panel">
+    <h2>发送短信</h2>
+    <form id="send-form">
+        <label>收件号码（如 +8613800138000 或 13800138000）
+            <input type="text" name="to" required pattern="[+]?\d+">
+        </label>
+        <label>内容（支持中文与表情；超长会自动分段）
+            <textarea name="content" rows="4" required maxlength="4096"></textarea>
+        </label>
+        <button class="primary" type="submit">发送</button>
+        <span id="send-status" class="muted"></span>
+    </form>
+</section>
+
+<section id="tab-outbox" class="panel">
+    <h2>发件箱</h2>
+    <table class="msglist" id="outbox-table">
+        <thead><tr><th>时间</th><th>收件人</th><th>状态</th><th>段数</th><th>内容</th></tr></thead>
+        <tbody></tbody>
+    </table>
+</section>
+
+<section id="tab-keys" class="panel">
+    <h2>API Keys</h2>
+    <form id="key-create-form" class="inline">
+        <input type="text" name="label" placeholder="标签，如：crm-prod" required maxlength="64">
+        <label class="check"><input type="checkbox" name="scope_read" checked> sms:read</label>
+        <label class="check"><input type="checkbox" name="scope_send" checked> sms:send</label>
+        <button class="primary" type="submit">生成新 Key</button>
+    </form>
+    <div id="key-result" class="alert info" style="display:none;"></div>
+    <table class="msglist" id="keys-table">
+        <thead><tr><th>标签</th><th>前缀</th><th>权限</th><th>创建</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+    </table>
+</section>
+
+{% endblock %}
+{% block scripts %}
+<script src="/static/app.js"></script>
+{% endblock %}
