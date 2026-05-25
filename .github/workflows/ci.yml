@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ubuntu-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Project checks
+        run: |
+          bash scripts/check.sh
+
+      - name: Import application in mock mode
+        env:
+          SMSGW_DATA_DIR: /tmp/smsgw-data
+          SMSGW_LOG_DIR: /tmp/smsgw-log
+          SMSGW_CONFIG_DIR: /tmp/smsgw-etc
+          SMSGW_SESSION_SECRET_FILE: /tmp/smsgw-etc/secret.key
+          SMSGW_MOCK_MODEM: "true"
+          SMSGW_MOCK_MODEM_COUNT: "1"
+        run: |
+          python - <<'PY'
+          from app.main import app
+          print(app.title)
+          PY

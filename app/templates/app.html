@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}SMS Gateway{% endblock %}
+{% block content %}
+<div class="shell">
+    <aside class="sidebar">
+        <div class="brand">SMS Gateway</div>
+        <nav class="nav">
+            <button class="nav-item active" data-tab="overview">概览</button>
+            <button class="nav-item" data-tab="send">发送</button>
+            <button class="nav-item" data-tab="messages">消息</button>
+            <button class="nav-item" data-tab="keys">API</button>
+        </nav>
+        <div class="session">
+            <span>{{ user.username }}</span>
+            <form method="post" action="/logout">
+                <button class="text-button" type="submit">退出</button>
+            </form>
+        </div>
+    </aside>
+
+    <main class="workspace">
+        <header class="page-head">
+            <div>
+                <h1>多设备短信控制台</h1>
+                <p>自动识别 A7670G 模块，按设备隔离收发任务。</p>
+            </div>
+            <div id="online-summary" class="summary-pill">扫描中</div>
+        </header>
+
+        <section id="tab-overview" class="view active">
+            <div class="section-head">
+                <div>
+                    <h2>设备</h2>
+                    <span class="hint">未备注设备显示为编号001、编号002...</span>
+                </div>
+                <button type="button" class="button" id="scan-devices-button">搜索设备</button>
+            </div>
+            <div id="devices-grid" class="devices-grid"></div>
+        </section>
+
+        <section id="tab-send" class="view">
+            <div class="two-col">
+                <form id="send-form" class="panel clean-form">
+                    <h2>发送短信</h2>
+                    <label>发送设备
+                        <select name="device_id" id="send-device"></select>
+                    </label>
+                    <label>收件号码
+                        <input type="text" name="to" required pattern="[+]?\d+" placeholder="+8613800138000">
+                    </label>
+                    <label>短信内容
+                        <textarea name="content" rows="6" required maxlength="4096" placeholder="输入短信内容"></textarea>
+                    </label>
+                    <div class="form-row">
+                        <span id="send-status" class="hint"></span>
+                        <button class="primary" type="submit">发送</button>
+                    </div>
+                </form>
+                <div class="panel">
+                    <h2>发送策略</h2>
+                    <p class="muted">每个模块独立串口、独立发送锁。指定设备时只使用该设备；不指定时自动选择第一台在线设备。</p>
+                    <p class="muted">SIM 本机号码优先使用模块返回的 <code>AT+CNUM</code>，若运营商未写入，可在设备卡片中手工备注。</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="tab-messages" class="view">
+            <div class="section-head">
+                <h2>消息</h2>
+                <select id="message-device-filter"></select>
+            </div>
+            <div class="panel">
+                <h3>收件箱</h3>
+                <table class="msglist" id="inbox-table">
+                    <thead><tr><th>时间</th><th>设备</th><th>发件人</th><th>内容</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="panel">
+                <h3>发件箱</h3>
+                <table class="msglist" id="outbox-table">
+                    <thead><tr><th>时间</th><th>设备</th><th>收件人</th><th>状态</th><th>内容</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="tab-keys" class="view">
+            <div class="panel">
+                <div class="section-head">
+                    <div>
+                        <h2>API Keys</h2>
+                        <span class="hint">管理员创建 Key 后，客户端只凭 API 地址和 Key 使用。</span>
+                    </div>
+                    <button type="button" class="button primary" id="open-key-modal">新建 Key</button>
+                </div>
+                <div id="key-result" class="alert info" style="display:none;"></div>
+                <table class="msglist" id="keys-table">
+                    <thead><tr><th>名称</th><th>前缀</th><th>权限</th><th>SIM 范围</th><th>额度</th><th>失效时间</th><th>状态</th><th>操作</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+</div>
+
+<div class="modal-backdrop" id="key-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="key-modal-title">
+        <div class="modal-head">
+            <div>
+                <h2 id="key-modal-title">新建 Key</h2>
+                <p class="muted">设置客户端可用的设备、发送额度和失效日期。</p>
+            </div>
+            <button type="button" class="icon-button" id="close-key-modal" aria-label="关闭">×</button>
+        </div>
+        <form id="key-create-form" class="key-form key-modal-form">
+                    <label>Key 名称
+                        <input type="text" name="label" placeholder="例如：crm-prod" required maxlength="64">
+                    </label>
+                    <div class="key-options">
+                        <label class="check"><input type="checkbox" name="scope_read" checked> 读取短信</label>
+                        <label class="check"><input type="checkbox" name="scope_send" checked> 发送短信</label>
+                    </div>
+                    <div>
+                        <div class="mini-label">可使用设备</div>
+                        <label class="check"><input type="checkbox" name="all_devices" checked> 全部可用设备</label>
+                        <div id="key-device-options" class="device-checks"></div>
+                    </div>
+                    <label>发送次数上限
+                        <input type="number" name="send_limit" min="1" placeholder="留空为无限使用">
+                    </label>
+                    <label>失效日期
+                        <input type="date" name="expires_at_date">
+                    </label>
+                    <div class="key-submit">
+                        <button id="key-submit-button" class="primary" type="submit">保存</button>
+                        <button id="key-cancel-edit" type="button">取消</button>
+                    </div>
+                </form>
+    </div>
+</div>
+
+<div class="modal-backdrop" id="key-display-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="key-display-title">
+        <div class="modal-head">
+            <div>
+                <h2 id="key-display-title">Key 已生成</h2>
+                <p class="muted">这是唯一一次完整显示，请复制后保存到安全位置。</p>
+            </div>
+            <button type="button" class="icon-button" id="close-key-display" aria-label="关闭">×</button>
+        </div>
+        <div class="key-secret-box">
+            <code id="generated-key-text"></code>
+        </div>
+        <div class="modal-actions">
+            <button type="button" class="button primary" id="copy-generated-key">一键复制</button>
+            <button type="button" class="button" id="dismiss-generated-key">我已保存</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/app.js"></script>
+{% endblock %}

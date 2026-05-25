@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}首次配置 · 验证码错误{% endblock %}
+{% block content %}
+<div class="card narrow">
+    <h1>验证失败</h1>
+    <div class="alert error">{{ error }}</div>
+    <form method="post" action="/setup/confirm">
+        <input type="hidden" name="user_id" value="{{ user_id }}">
+        <label>请重新输入 6 位验证码
+            <input type="text" name="code" inputmode="numeric" pattern="\d{6}" maxlength="6" required>
+        </label>
+        <button type="submit" class="primary">再次确认</button>
+    </form>
+    <p><a href="/setup" class="link">如果二维码已经丢失，重新开始</a></p>
+</div>
+{% endblock %}

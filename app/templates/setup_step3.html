@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}首次配置 · 完成{% endblock %}
+{% block content %}
+<div class="card narrow">
+    <h1>首次配置（3/3）：保存恢复码</h1>
+    <p>请将以下 <b>{{ recovery_codes|length }}</b> 个恢复码保存到密码管理器或离线安全位置。
+       每个恢复码只能使用一次，可在丢失 2FA 设备时登录账号。<b>这些代码只显示这一次。</b></p>
+    <pre class="recovery-codes">{% for c in recovery_codes %}{{ c }}
+{% endfor %}</pre>
+    <p><a href="/login" class="primary button">我已保存，前往登录</a></p>
+</div>
+{% endblock %}

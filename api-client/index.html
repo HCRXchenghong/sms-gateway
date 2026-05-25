@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SMS API Client</title>
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <section id="connect-screen" class="connect-screen">
+        <form id="connect-form" class="connect-card">
+            <div>
+                <p class="eyebrow">SMS API Client</p>
+                <h1>连接短信网关</h1>
+            </div>
+            <label>API 地址
+                <input name="base_url" type="url" placeholder="http://127.0.0.1:8080" required>
+            </label>
+            <label>API Key
+                <input name="api_key" type="password" placeholder="smsgw_xxx" required>
+            </label>
+            <button class="primary" type="submit">进入</button>
+            <p id="connect-status" class="status-line"></p>
+        </form>
+    </section>
+
+    <section id="app-screen" class="app-screen hidden">
+        <aside class="desktop-sidebar">
+            <div class="brand">SMS Client</div>
+            <button class="nav-button active" data-view="send">
+                <span class="icon send-icon"></span><span>发送</span>
+            </button>
+            <button class="nav-button" data-view="inbox">
+                <span class="icon inbox-icon"></span><span>接收</span>
+            </button>
+            <button class="nav-button" data-view="sent">
+                <span class="icon sent-icon"></span><span>记录</span>
+            </button>
+            <button id="disconnect-button" class="ghost-button">断开</button>
+        </aside>
+
+        <main class="client-main">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">SMS API Client</p>
+                    <h1 id="view-title">发送短信</h1>
+                </div>
+                <div class="topbar-actions">
+                    <select id="device-filter"></select>
+                    <button class="ghost-button disconnect-action" type="button">断开</button>
+                </div>
+            </header>
+
+            <section id="view-send" class="view active">
+                <form id="send-form" class="panel send-panel">
+                    <label>发送 SIM
+                        <select name="device_id" id="send-device"></select>
+                    </label>
+                    <label>收件号码
+                        <input type="text" name="to" required pattern="[+]?\d+" placeholder="+8613800138000">
+                    </label>
+                    <label>短信内容
+                        <textarea name="content" rows="7" required maxlength="4096" placeholder="输入短信内容"></textarea>
+                    </label>
+                    <div class="form-actions">
+                        <span id="send-status" class="status-line"></span>
+                        <button class="primary" type="submit">发送</button>
+                    </div>
+                </form>
+            </section>
+
+            <section id="view-inbox" class="view">
+                <div id="inbox-list" class="message-list"></div>
+            </section>
+
+            <section id="view-sent" class="view">
+                <div id="sent-list" class="message-list"></div>
+            </section>
+        </main>
+
+        <nav class="mobile-nav">
+            <button class="mobile-nav-button active" data-view="send" aria-label="发送">
+                <span class="icon send-icon"></span><span>发送</span>
+            </button>
+            <button class="mobile-nav-button" data-view="inbox" aria-label="接收">
+                <span class="icon inbox-icon"></span><span>接收</span>
+            </button>
+            <button class="mobile-nav-button" data-view="sent" aria-label="记录">
+                <span class="icon sent-icon"></span><span>记录</span>
+            </button>
+        </nav>
+    </section>
+
+    <script src="./app.js"></script>
+</body>
+</html>
