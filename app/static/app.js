@@ -2,7 +2,7 @@
 (function() {
     'use strict';
 
-    var state = { devices: [], activeDeviceFilter: '', editingKey: null };
+    var state = { devices: [], activeDeviceFilter: '', editingKey: null, deviceDrafts: {} };
 
     function $(sel, root) { return (root || document).querySelector(sel); }
     function $$(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
@@ -26,6 +26,49 @@
     }
     function messageDeviceName(m) {
         return m.device ? deviceName(m.device) : '未绑定';
+    }
+    function deviceDraftId(deviceId) {
+        return String(deviceId);
+    }
+    function getDeviceDraft(deviceId) {
+        return state.deviceDrafts[deviceDraftId(deviceId)] || null;
+    }
+    function rememberDeviceDraft(form) {
+        if (!form || !form.dataset || !form.dataset.id || !form.elements) return;
+        state.deviceDrafts[deviceDraftId(form.dataset.id)] = {
+            label: form.elements.label ? form.elements.label.value : '',
+            sim: form.elements.sim ? form.elements.sim.value : ''
+        };
+    }
+    function clearDeviceDraft(deviceId) {
+        delete state.deviceDrafts[deviceDraftId(deviceId)];
+    }
+    function captureDeviceEditFocus() {
+        var active = document.activeElement;
+        if (!active || !active.form || !active.form.classList.contains('device-edit') || !active.name) return null;
+        rememberDeviceDraft(active.form);
+        return {
+            id: active.form.dataset.id,
+            name: active.name,
+            start: typeof active.selectionStart === 'number' ? active.selectionStart : null,
+            end: typeof active.selectionEnd === 'number' ? active.selectionEnd : null
+        };
+    }
+    function restoreDeviceEditFocus(snapshot) {
+        if (!snapshot) return;
+        var input = $('.device-edit[data-id="' + snapshot.id + '"] [name="' + snapshot.name + '"]');
+        if (!input) return;
+        input.focus();
+        if (snapshot.start !== null && typeof input.setSelectionRange === 'function') {
+            input.setSelectionRange(snapshot.start, snapshot.end === null ? snapshot.start : snapshot.end);
+        }
+    }
+    function bindDeviceEditDraft(edit) {
+        $$('input[name="label"], input[name="sim"]', edit).forEach(function(input) {
+            input.addEventListener('input', function() {
+                rememberDeviceDraft(edit);
+            });
+        });
     }
     async function api(path, opts) {
         var r = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts || {}));
@@ -61,11 +104,13 @@
     function renderDevices(items) {
         state.devices = items || [];
         var grid = $('#devices-grid');
+        var focusSnapshot = captureDeviceEditFocus();
         grid.innerHTML = '';
         if (!state.devices.length) {
             grid.appendChild(el('div', { class: 'panel muted' }, '暂未发现设备。插入模块后系统会自动扫描。'));
         }
         state.devices.forEach(function(d) {
+            var draft = getDeviceDraft(d.id);
             var card = el('div', { class: 'device-card' });
             var top = el('div', { class: 'device-top' });
             var title = el('div');
@@ -84,9 +129,10 @@
             card.appendChild(meta);
 
             var edit = el('form', { class: 'device-edit', dataset: { id: String(d.id) } });
-            edit.appendChild(el('input', { type: 'text', name: 'label', placeholder: '设备备注', value: d.label || '' }));
-            edit.appendChild(el('input', { type: 'text', name: 'sim', placeholder: 'SIM 号码备注', value: d.sim_number_manual || '' }));
+            edit.appendChild(el('input', { type: 'text', name: 'label', placeholder: '设备备注', value: draft ? draft.label : (d.label || '') }));
+            edit.appendChild(el('input', { type: 'text', name: 'sim', placeholder: 'SIM 号码备注', value: draft ? draft.sim : (d.sim_number_manual || '') }));
             edit.appendChild(el('button', { type: 'submit' }, '保存'));
+            bindDeviceEditDraft(edit);
             edit.addEventListener('submit', saveDevice);
             card.appendChild(edit);
             grid.appendChild(card);
@@ -95,6 +141,7 @@
         renderKeyDeviceOptions();
         var online = state.devices.filter(function(d) { return d.status === 'online'; }).length;
         $('#online-summary').textContent = online + '/' + state.devices.length + ' 在线';
+        restoreDeviceEditFocus(focusSnapshot);
     }
 
     function renderDeviceSelectors() {
@@ -229,6 +276,7 @@
         var form = e.target;
         var id = form.dataset.id;
         var fd = new FormData(form);
+        rememberDeviceDraft(form);
         var r = await api('/app/devices/' + id, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -237,7 +285,11 @@
                 sim_number_manual: fd.get('sim') || null
             })
         });
-        if (!r.ok) alert(await errorText(r));
+        if (!r.ok) {
+            alert(await errorText(r));
+            return;
+        }
+        clearDeviceDraft(id);
         await refreshDevices();
         await refreshMessages();
     }
