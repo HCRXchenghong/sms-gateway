@@ -21,14 +21,13 @@ CREATE TABLE IF NOT EXISTS users (
     totp_secret_enc BLOB,
     totp_enabled    INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'admin',
+    display_name    TEXT,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    last_login_at   INTEGER
 );
-CREATE TRIGGER IF NOT EXISTS trg_users_single_admin
-BEFORE INSERT ON users
-WHEN (SELECT COUNT(*) FROM users) >= 1
-BEGIN
-    SELECT RAISE(ABORT, 'only one admin user allowed');
-END;
 
 CREATE TABLE IF NOT EXISTS recovery_codes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,6 +152,63 @@ CREATE TABLE IF NOT EXISTS audit_log (
     status_code INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+
+CREATE TABLE IF NOT EXISTS call_sessions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id        TEXT UNIQUE NOT NULL,
+    device_id      INTEGER REFERENCES devices(id),
+    sim_key        TEXT,
+    sim_number     TEXT,
+    direction      TEXT NOT NULL,
+    remote         TEXT,
+    state          TEXT NOT NULL,
+    end_reason     TEXT,
+    created_at     INTEGER NOT NULL,
+    ringing_at     INTEGER,
+    answered_at    INTEGER,
+    ended_at       INTEGER,
+    duration       INTEGER NOT NULL DEFAULT 0,
+    tts_log        TEXT,
+    transcript     TEXT,
+    recording_path TEXT,
+    owner_user_id  INTEGER REFERENCES users(id),
+    origin         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_calls_created ON call_sessions(created_at);
+CREATE INDEX IF NOT EXISTS idx_calls_device ON call_sessions(device_id);
+CREATE INDEX IF NOT EXISTS idx_calls_remote ON call_sessions(remote);
+
+CREATE TABLE IF NOT EXISTS contacts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    number        TEXT NOT NULL,
+    group_name    TEXT,
+    note          TEXT,
+    favorite      INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_owner ON contacts(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_number ON contacts(number);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    secret     INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    peer        TEXT NOT NULL,
+    device_id   INTEGER REFERENCES devices(id),
+    last_at     INTEGER NOT NULL,
+    unread      INTEGER NOT NULL DEFAULT 0,
+    archived    INTEGER NOT NULL DEFAULT 0,
+    draft       TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_peer ON conversations(peer, device_id);
 """
 
 
@@ -247,6 +303,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
         WHERE sim_key IS NULL
         """
     )
+
+    # The upstream schema allowed exactly one admin account. Multi-user account
+    # management is a product requirement, so the guard is removed and the
+    # existing account keeps full admin rights through the role column.
+    conn.execute("DROP TRIGGER IF EXISTS trg_users_single_admin")
+
+    user_cols = columns("users")
+    for column, ddl in (
+        ("role", "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'"),
+        ("display_name", "ALTER TABLE users ADD COLUMN display_name TEXT"),
+        ("is_active", "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"),
+        ("must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"),
+        ("last_login_at", "ALTER TABLE users ADD COLUMN last_login_at INTEGER"),
+    ):
+        if column not in user_cols:
+            conn.execute(ddl)
 
 
 @contextmanager

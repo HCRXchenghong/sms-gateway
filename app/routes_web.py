@@ -23,10 +23,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from . import repo, security
+from . import repo, repo_threads, security
 from .auth import CurrentUser, get_current_user, get_optional_user
 from .config import settings
 from .hub import hub
+from .login_service import authenticate, issue_session
 from .modem import ModemError
 
 router = APIRouter()
@@ -106,11 +107,13 @@ async def _scan_devices(request: Request) -> dict:
 
 
 async def _clean_key_policy(scopes: list[str], allowed_device_ids: Optional[list[int]]) -> tuple[list[str], Optional[list[int]]]:
-    valid = {"sms:read", "sms:send"}
+    valid = {"sms:read", "sms:send", "voice:read", "voice:dial", "ai:use"}
     bad = [s for s in scopes if s not in valid]
     if bad:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid scopes: {bad}")
-    cleaned_scopes = [s for s in ("sms:read", "sms:send") if s in set(scopes)]
+    cleaned_scopes = [
+        s for s in ("sms:read", "sms:send", "voice:read", "voice:dial", "ai:use") if s in set(scopes)
+    ]
     if not cleaned_scopes:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "at least one scope is required")
     if allowed_device_ids is None:
@@ -247,50 +250,21 @@ async def login_submit(
     code: str = Form(""),
     recovery: str = Form(""),
 ):
-    ip = _client_ip(request)
-    ua = request.headers.get("user-agent", "")
-    locked = await asyncio.to_thread(
-        repo.is_locked,
-        username,
-        ip,
-        settings.login_lock_window_seconds,
-        settings.login_lock_max_attempts,
-    )
-    if locked:
-        await asyncio.to_thread(repo.record_login_attempt, username, ip, False)
+    result = await authenticate(request, username, password, code, recovery)
+    if not result.ok:
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "登录失败次数过多，请稍后重试"},
-            status_code=429,
+            {"request": request, "error": result.error},
+            status_code=result.status_code,
         )
-
-    user = await asyncio.to_thread(repo.get_user_by_username, username)
-    if not user or not user["totp_enabled"]:
-        await asyncio.to_thread(repo.record_login_attempt, username, ip, False)
-        return templates.TemplateResponse("login.html", {"request": request, "error": "账号或密码不正确"}, status_code=401)
-    if not await asyncio.to_thread(security.verify_password, password, user["password_hash"]):
-        await asyncio.to_thread(repo.record_login_attempt, username, ip, False)
-        return templates.TemplateResponse("login.html", {"request": request, "error": "账号或密码不正确"}, status_code=401)
-
-    second_ok = False
-    if recovery.strip():
-        second_ok = await asyncio.to_thread(repo.consume_recovery_code, user["id"], recovery.strip())
-    elif code.strip():
-        secret = await asyncio.to_thread(repo.get_totp_secret, user["id"])
-        if secret:
-            second_ok = security.verify_totp(secret, code.strip())
-    if not second_ok:
-        await asyncio.to_thread(repo.record_login_attempt, username, ip, False)
-        return templates.TemplateResponse("login.html", {"request": request, "error": "二次验证失败"}, status_code=401)
-
-    await asyncio.to_thread(repo.record_login_attempt, username, ip, True)
-    sid = await asyncio.to_thread(repo.create_session, user["id"], settings.session_max_age_seconds, ip, ua)
-    await asyncio.to_thread(repo.audit, "user", user["id"], username, ip, "login", None, 200)
+    user = result.user
+    ip = _client_ip(request)
+    sid, max_age = await issue_session(user, request)
     resp = RedirectResponse("/app", status_code=302)
     resp.set_cookie(
         settings.session_cookie_name,
         sid,
-        max_age=settings.session_max_age_seconds,
+        max_age=max_age,
         httponly=True,
         samesite="lax",
         secure=request.url.scheme == "https",
@@ -435,6 +409,7 @@ async def app_send(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
     await asyncio.to_thread(repo.set_outbox_device, out_id, selected_device_id)
     await asyncio.to_thread(repo.mark_outbox, out_id, "sent", segments, None)
+    await asyncio.to_thread(repo_threads.touch_thread, body.to, selected_device_id, security.now_epoch())
     device = await asyncio.to_thread(repo.get_device, selected_device_id)
     await hub.publish(
         "sms.sent",
@@ -542,15 +517,38 @@ async def app_keys_delete(
     return {"ok": True}
 
 
+def _ws_session_id(ws: WebSocket) -> Optional[str]:
+    """Accept a session from the cookie, the Authorization header or ?token=.
+
+    Native WebSocket clients such as the Flutter app cannot always set
+    cookies, so all three transports are supported.
+    """
+    cookie = ws.cookies.get(settings.session_cookie_name)
+    if cookie:
+        return cookie
+    auth = ws.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        if token and not token.startswith("smsgw_"):
+            return token
+    token = ws.query_params.get("token")
+    if token and not token.startswith("smsgw_"):
+        return token
+    return None
+
+
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    sid = ws.cookies.get(settings.session_cookie_name)
+    sid = _ws_session_id(ws)
     if not sid:
         await ws.close(code=4401)
         return
     row = await asyncio.to_thread(repo.get_session, sid)
     if not row:
         await ws.close(code=4401)
+        return
+    if not row["is_active"]:
+        await ws.close(code=4403)
         return
     await ws.accept()
     await hub.register(ws)

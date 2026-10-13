@@ -4,16 +4,35 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import bcrypt
 import pyotp
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .config import settings
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,32}$")
+PASSWORD_RE = re.compile(r"^(?=.*[a-z])(?=.*[A-Z]).{8,}$")
+
+
+def validate_username(username: str) -> Optional[str]:
+    """Return a Chinese error message, or None when the username is acceptable."""
+    if not username or not USERNAME_RE.match(username):
+        return "用户名需 3-32 位，仅包含字母、数字、下划线、点和短横线"
+    return None
+
+
+def validate_password(password: str) -> Optional[str]:
+    if not password or len(password) < 8:
+        return "密码至少 8 位"
+    if not PASSWORD_RE.match(password):
+        return "密码至少 8 位，并且必须同时包含大写和小写字母"
+    return None
 
 
 def load_or_create_master_key() -> bytes:

@@ -110,7 +110,8 @@ def create_session(user_id: int, ttl_seconds: int, ip: str, ua: str) -> str:
 def get_session(sid: str) -> Optional[sqlite3.Row]:
     with connection() as c:
         return c.execute(
-            "SELECT s.*, u.username FROM sessions s JOIN users u ON u.id = s.user_id"
+            "SELECT s.*, u.username, u.role, u.is_active, u.display_name, u.must_change_password"
+            " FROM sessions s JOIN users u ON u.id = s.user_id"
             " WHERE s.sid = ? AND s.expires_at > ?",
             (sid, security.now_epoch()),
         ).fetchone()

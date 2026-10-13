@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 
-from . import repo
+from . import repo, repo_threads
 from .auth import CurrentApiKey, require_scope_read, require_scope_send
 from .config import settings
 from .modem import ModemError
@@ -97,6 +97,7 @@ async def api_send_sms(
         )
     await asyncio.to_thread(repo.set_outbox_device, out_id, selected_device_id)
     await asyncio.to_thread(repo.mark_outbox, out_id, "sent", segments, None)
+    await asyncio.to_thread(repo_threads.touch_thread, body.to, selected_device_id, int(time.time()))
     await asyncio.to_thread(
         repo.audit, "api_key", key.id, key.prefix, _client_ip(request), "sms.send", str(out_id), 200
     )

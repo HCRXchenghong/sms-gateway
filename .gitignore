@@ -23,7 +23,9 @@ env/
 *.swp
 
 # Local data (never commit)
-data/
+# Anchored to the repo root: a bare "data/" also swallowed the Flutter app's
+# lib/src/data source directory.
+/data/
 _devdata/
 _realdata/
 .env

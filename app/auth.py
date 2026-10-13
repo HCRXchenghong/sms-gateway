@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Optional
 
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
 from . import repo
 from .config import settings
@@ -17,6 +17,13 @@ class CurrentUser:
     id: int
     username: str
     sid: str
+    role: str = "admin"
+    display_name: Optional[str] = None
+    must_change_password: bool = False
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
 
 
 @dataclass
@@ -37,14 +44,56 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _session_token(request: Request) -> Optional[str]:
+    """Session id from the cookie, a bearer token, or a query parameter.
+
+    The Flutter app cannot rely on cookies alone, so a session id may also be
+    presented as Authorization: Bearer <sid>. API keys always carry the smsgw_
+    prefix, which keeps the two namespaces apart.
+    """
+    cookie = request.cookies.get(settings.session_cookie_name)
+    if cookie:
+        return cookie
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        if token and not token.startswith("smsgw_"):
+            return token
+    query_token = request.query_params.get("token")
+    if query_token and not query_token.startswith("smsgw_"):
+        return query_token
+    return None
+
+
 async def get_current_user(request: Request) -> CurrentUser:
-    sid = request.cookies.get(settings.session_cookie_name)
+    sid = _session_token(request)
     if not sid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not_authenticated")
     row = await asyncio.to_thread(repo.get_session, sid)
     if not row:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "session_expired")
-    return CurrentUser(id=row["user_id"], username=row["username"], sid=sid)
+    if not row["is_active"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "account_disabled")
+    return CurrentUser(
+        id=row["user_id"],
+        username=row["username"],
+        sid=sid,
+        role=row["role"] or "admin",
+        display_name=row["display_name"],
+        must_change_password=bool(row["must_change_password"]),
+    )
+
+
+def require_role(*roles: str):
+    """Dependency factory enforcing that the caller holds one of these roles."""
+    allowed = set(roles)
+
+    async def dependency(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+        if user.role not in allowed:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "insufficient_role")
+        return user
+
+    return dependency
 
 
 async def get_optional_user(request: Request) -> Optional[CurrentUser]:
@@ -92,3 +141,15 @@ async def require_scope_read(request: Request) -> CurrentApiKey:
 
 async def require_scope_send(request: Request) -> CurrentApiKey:
     return await require_api_key(request, "sms:send")
+
+
+async def require_scope_voice_read(request: Request) -> CurrentApiKey:
+    return await require_api_key(request, "voice:read")
+
+
+async def require_scope_voice_dial(request: Request) -> CurrentApiKey:
+    return await require_api_key(request, "voice:dial")
+
+
+async def require_scope_ai(request: Request) -> CurrentApiKey:
+    return await require_api_key(request, "ai:use")

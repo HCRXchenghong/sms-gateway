@@ -13,7 +13,7 @@ from serial.tools import list_ports
 
 from . import repo
 from .config import settings
-from .modem import DeviceIdentity, Modem, ModemError
+from .modem import DeviceIdentity, Modem, ModemError, VoiceUrcHandler
 from .modem_mock import MockModem
 from .pdu import IncomingSms
 
@@ -138,13 +138,44 @@ async def discover_at_ports(skip_stable_keys: Optional[set[str]] = None) -> list
 class ModemManager:
     """Owns all live modem workers and prevents ttyUSB conflicts."""
 
-    def __init__(self, on_sms: SmsHandler):
+    def __init__(self, on_sms: SmsHandler, on_voice_urc: Optional[VoiceUrcHandler] = None):
         self._on_sms = on_sms
+        self._on_voice_urc = on_voice_urc
         self._stop = asyncio.Event()
         self._modems: Dict[int, Modem | MockModem] = {}
         self._tasks: Dict[int, asyncio.Task] = {}
         self._stable_to_device: Dict[str, int] = {}
         self._lock = asyncio.Lock()
+
+    def set_voice_handler(self, handler: Optional[VoiceUrcHandler]) -> None:
+        """Attach the voice URC handler after construction.
+
+        CallManager needs ModemManager to look modems up, and ModemManager
+        needs CallManager to receive URCs. Wiring it in two steps keeps both
+        constructors simple and avoids an import cycle.
+        """
+        self._on_voice_urc = handler
+
+    def get_modem(self, device_id: int) -> Optional[Modem | MockModem]:
+        return self._modems.get(int(device_id))
+
+    def online_device_ids(self) -> list[int]:
+        return [int(d) for d, m in self._modems.items() if m.connected]
+
+    async def pick_call_device(self, device_id: Optional[int] = None) -> int:
+        """Resolve which online module should place or hold a call."""
+        async with self._lock:
+            if device_id is not None:
+                modem = self._modems.get(int(device_id))
+                if not modem or not modem.connected:
+                    raise ModemError(f"device {device_id} is not online")
+                return int(device_id)
+            for row in await asyncio.to_thread(repo.list_devices):
+                candidate = int(row["id"])
+                modem = self._modems.get(candidate)
+                if modem and modem.connected:
+                    return candidate
+        raise ModemError("no online device available")
 
     @property
     def connected(self) -> bool:
@@ -195,7 +226,14 @@ class ModemManager:
                 model="A7670G Mock",
                 manufacturer="SIMCom",
             )
-            modem = MockModem(row["id"], self._on_sms, self._on_status, port=f"MOCK{idx + 1}")
+            modem = MockModem(
+                row["id"],
+                self._on_sms,
+                self._on_status,
+                port=f"MOCK{idx + 1}",
+                on_voice_urc=self._on_voice_urc,
+                sim_number=f"+10000000{idx + 1:03d}",
+            )
             task = asyncio.create_task(modem.run(), name=f"mock-modem-{idx + 1}")
             self._modems[row["id"]] = modem
             self._tasks[row["id"]] = task
@@ -235,6 +273,7 @@ class ModemManager:
                     on_sms=self._on_sms,
                     on_identity=self._on_identity,
                     on_status=self._on_status,
+                    on_voice_urc=self._on_voice_urc,
                 )
                 task = asyncio.create_task(modem.run(), name=f"modem-{device_id}")
                 self._modems[device_id] = modem

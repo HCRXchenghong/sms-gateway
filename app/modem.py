@@ -13,12 +13,26 @@ import serial
 
 from .config import settings
 from .pdu import IncomingSms, OutgoingSegment, decode_deliver, encode_submit_ucs2
+from .voice.parser import CALL_PROGRESS_LINES, VoiceUrc, classify_voice_line, is_voice_urc, parse_clcc
 
 log = logging.getLogger(__name__)
 
 SmsHandler = Callable[[int, IncomingSms], Awaitable[None]]
 IdentityHandler = Callable[[int, "DeviceIdentity"], Awaitable[None]]
 StatusHandler = Callable[[int, str, Optional[str]], Awaitable[None]]
+# Voice URCs are delivered synchronously from the event loop thread; the
+# handler is expected to schedule any async work itself.
+VoiceUrcHandler = Callable[[int, VoiceUrc], None]
+
+DTMF_CHARS = set("0123456789*#ABCD")
+
+
+def sanitize_dial_string(number: str) -> str:
+    """Keep only characters a module accepts inside ATD."""
+    cleaned = "".join(ch for ch in number.strip() if ch.isdigit() or ch in "+*#,")
+    if not cleaned:
+        raise ModemError("invalid dial string")
+    return cleaned
 
 
 @dataclass
@@ -52,11 +66,13 @@ class Modem:
         on_sms: SmsHandler,
         on_identity: Optional[IdentityHandler] = None,
         on_status: Optional[StatusHandler] = None,
+        on_voice_urc: Optional[VoiceUrcHandler] = None,
     ):
         self.device_id = device_id
         self._on_sms = on_sms
         self._on_identity = on_identity
         self._on_status = on_status
+        self._on_voice_urc = on_voice_urc
         self._serial: Optional[serial.Serial] = None
         self._port: Optional[str] = at_port
         self._lock = asyncio.Lock()
@@ -241,6 +257,13 @@ class Modem:
             self._urc_queue.put_nowait(token)
             asyncio.create_task(self._handle_cmti_async())
             return
+        if is_voice_urc(token) and self._on_voice_urc:
+            urc = classify_voice_line(token)
+            if urc is not None:
+                try:
+                    self._on_voice_urc(self.device_id, urc)
+                except Exception as e:  # never let a callback kill the reader
+                    log.warning("voice urc handler failed: %s", e)
         self._response_queue.put_nowait(token)
 
     async def _configure(self) -> None:
@@ -249,7 +272,20 @@ class Modem:
         await self._cmd("AT+CMGF=0", timeout=2)
         await self._cmd('AT+CPMS="SM","SM","SM"', timeout=3)
         await self._cmd("AT+CNMI=2,1,0,0,0", timeout=3)
+        await self._configure_voice()
         log.info("modem configured (PDU mode, +CMTI URC enabled)")
+
+    async def _configure_voice(self) -> None:
+        """Best-effort voice setup. Firmware support varies, so never fail hard."""
+        for cmd in (
+            "AT+CVHU=1",   # let AT+CHUP hang the call up
+            "AT+CLIP=1",   # report the caller number on RING
+            "AT+CDTAM=1",  # keep data alive during a voice call
+        ):
+            try:
+                await self._cmd(cmd, timeout=3)
+            except ModemError as e:
+                log.info("voice setup %s unsupported: %s", cmd, e)
 
     async def _identify(self) -> None:
         """Best-effort module/SIM identity collection."""
@@ -328,13 +364,19 @@ class Modem:
         async with self._lock:
             return await self._cmd_unlocked(cmd, timeout)
 
-    async def _cmd_unlocked(self, cmd: str, timeout: float = 10.0) -> List[str]:
+    async def _cmd_unlocked(
+        self,
+        cmd: str,
+        timeout: float = 10.0,
+        encoding: str = "ascii",
+        accept_call_progress: bool = False,
+    ) -> List[str]:
         if not self._serial or not self._reader_thread:
             raise ModemError("modem not open")
         log.debug(">> %s", cmd)
         self._drain_response_queue()
-        await self._serial_write((cmd + "\r\n").encode("ascii"))
-        return await self._read_response(timeout)
+        await self._serial_write((cmd + "\r\n").encode(encoding, errors="replace"))
+        return await self._read_response(timeout, accept_call_progress=accept_call_progress)
 
     async def _serial_write(self, data: bytes) -> None:
         ser = self._serial
@@ -354,8 +396,18 @@ class Modem:
             except asyncio.QueueEmpty:
                 break
 
-    async def _read_response(self, timeout: float, expect_prompt: bool = False) -> List[str]:
-        """Collect response lines until OK / ERROR / +CMS ERROR."""
+    async def _read_response(
+        self,
+        timeout: float,
+        expect_prompt: bool = False,
+        accept_call_progress: bool = False,
+    ) -> List[str]:
+        """Collect response lines until OK / ERROR / +CMS ERROR.
+
+        With accept_call_progress set, a call progress line such as BUSY or NO
+        CARRIER also terminates the read. Some firmwares report those instead
+        of OK when a dial attempt fails immediately.
+        """
         lines: List[str] = []
         deadline = time.monotonic() + timeout
         while True:
@@ -375,6 +427,10 @@ class Modem:
             lines.append(line)
             if line == "OK":
                 return lines
+            if accept_call_progress:
+                for terminal in CALL_PROGRESS_LINES:
+                    if line == terminal or line.startswith(terminal + " "):
+                        return lines
             if line == "ERROR" or line.startswith("+CMS ERROR") or line.startswith("+CME ERROR"):
                 raise ModemError(line)
 
@@ -472,3 +528,178 @@ class Modem:
         await self._read_response(5, expect_prompt=True)
         await self._serial_write(seg.pdu_hex.encode("ascii") + b"\x1a")
         await self._read_response(settings.modem_send_timeout_seconds)
+
+    # ------------------------------------------------------------------
+    # Voice
+    # ------------------------------------------------------------------
+
+    def _require_connected(self) -> None:
+        if not self.connected:
+            raise ModemError("modem not connected")
+
+    async def dial(self, number: str) -> List[str]:
+        """Start a voice call. The trailing semicolon selects voice, not data."""
+        self._require_connected()
+        target = sanitize_dial_string(number)
+        async with self._lock:
+            return await self._cmd_unlocked(
+                f"ATD{target};",
+                timeout=settings.voice_dial_timeout_seconds,
+                accept_call_progress=True,
+            )
+
+    async def answer(self) -> List[str]:
+        """Answer an incoming call."""
+        self._require_connected()
+        async with self._lock:
+            return await self._cmd_unlocked(
+                "ATA", timeout=settings.voice_answer_timeout_seconds, accept_call_progress=True
+            )
+
+    async def hangup(self) -> None:
+        """Hang up. Falls back to ATH when the firmware ignores AT+CHUP."""
+        self._require_connected()
+        async with self._lock:
+            try:
+                await self._cmd_unlocked("AT+CHUP", timeout=8, accept_call_progress=True)
+                return
+            except ModemError as e:
+                log.info("AT+CHUP failed, falling back to ATH: %s", e)
+            try:
+                await self._cmd_unlocked("ATH", timeout=5, accept_call_progress=True)
+            except ModemError as e:
+                log.warning("ATH also failed: %s", e)
+
+    async def send_dtmf(self, digits: str) -> int:
+        """Send DTMF tones during a call. Returns the number of tones sent."""
+        self._require_connected()
+        sent = 0
+        for ch in digits.strip():
+            if ch.upper() not in DTMF_CHARS:
+                continue
+            async with self._lock:
+                await self._cmd_unlocked(f'AT+VTS="{ch.upper()}"', timeout=5)
+            sent += 1
+        return sent
+
+    async def tts_speak(self, text: str, mode: int = 1) -> None:
+        """Play text through the module synthesiser.
+
+        mode 1 sends UCS2 hex and is the safe default for Chinese.
+        mode 2 sends the literal bytes and needs a matching serial encoding.
+        """
+        self._require_connected()
+        text = text.strip()
+        if not text:
+            return
+        if int(mode) == 2:
+            cmd = f'AT+CTTS=2,"{text}"'
+            encoding = settings.voice_tts_text_encoding
+        else:
+            payload = text.encode("utf-16-be").hex().upper()
+            cmd = f'AT+CTTS=1,"{payload}"'
+            encoding = "ascii"
+        async with self._lock:
+            await self._cmd_unlocked(cmd, timeout=settings.voice_tts_timeout_seconds, encoding=encoding)
+
+    async def tts_stop(self) -> None:
+        """Stop an in-progress TTS playback."""
+        self._require_connected()
+        async with self._lock:
+            try:
+                await self._cmd_unlocked("AT+CTTS=0", timeout=5)
+            except ModemError as e:
+                log.info("AT+CTTS=0 unsupported or idle: %s", e)
+
+    async def tts_supported(self) -> bool:
+        """Probe AT+CTTS=? so we do not send TTS to a firmware without it."""
+        try:
+            async with self._lock:
+                await self._cmd_unlocked("AT+CTTS=?", timeout=4)
+            return True
+        except ModemError:
+            return False
+
+    async def list_calls(self) -> List[dict]:
+        """Return parsed AT+CLCC rows. Empty list means no call."""
+        self._require_connected()
+        async with self._lock:
+            lines = await self._cmd_unlocked("AT+CLCC", timeout=5)
+        rows = []
+        for line in lines:
+            row = parse_clcc(line)
+            if row:
+                rows.append(row)
+        return rows
+
+    async def signal_quality(self) -> Optional[Tuple[int, int]]:
+        """Return (rssi, ber) from AT+CSQ, or None when unsupported."""
+        try:
+            async with self._lock:
+                lines = await self._cmd_unlocked("AT+CSQ", timeout=4)
+        except ModemError:
+            return None
+        for line in lines:
+            if line.startswith("+CSQ:"):
+                parts = [p.strip() for p in line[5:].split(",")]
+                try:
+                    return int(parts[0]), int(parts[1])
+                except (ValueError, IndexError):
+                    return None
+        return None
+
+    async def registration_status(self) -> Dict[str, str]:
+        """Return CS/PS/EPS registration flags for the device health panel."""
+        out: Dict[str, str] = {}
+        for cmd, key in (("AT+CPIN?", "pin"), ("AT+CREG?", "creg"), ("AT+CEREG?", "cereg")):
+            try:
+                async with self._lock:
+                    lines = await self._cmd_unlocked(cmd, timeout=4)
+            except ModemError:
+                continue
+            for line in lines:
+                if line.startswith(cmd.split("?")[0].replace("AT+", "+")):
+                    out[key] = line.split(":", 1)[1].strip()
+                    break
+        return out
+
+    async def set_volume(self, level: int) -> None:
+        self._require_connected()
+        level = max(0, min(int(level), settings.voice_volume_max))
+        async with self._lock:
+            await self._cmd_unlocked(f"AT+CLVL={level}", timeout=4)
+
+    async def get_volume(self) -> Optional[int]:
+        try:
+            async with self._lock:
+                lines = await self._cmd_unlocked("AT+CLVL?", timeout=4)
+        except ModemError:
+            return None
+        for line in lines:
+            if line.startswith("+CLVL:"):
+                match = re.search(r"\d+", line[6:])
+                if match:
+                    return int(match.group(0))
+        return None
+
+    async def set_mute(self, muted: bool) -> None:
+        self._require_connected()
+        async with self._lock:
+            await self._cmd_unlocked(f"AT+CMUT={1 if muted else 0}", timeout=4)
+
+    async def set_audio_channel(self, channel: int) -> None:
+        """AT+CSDVC selects where call audio goes, e.g. handset vs USB audio."""
+        self._require_connected()
+        async with self._lock:
+            await self._cmd_unlocked(f"AT+CSDVC={int(channel)}", timeout=4)
+
+    async def raw_at(self, command: str, timeout: float = 5.0) -> List[str]:
+        """Send a literal AT command. Used by the hardware bring-up console."""
+        self._require_connected()
+        command = command.strip()
+        if not command.upper().startswith("AT"):
+            raise ModemError("command must start with AT")
+        if any(bad in command.upper() for bad in ("ATZ", "AT&F", "CFUN=0", "CFUN=1,1")):
+            raise ModemError("reset commands are blocked from the console")
+        async with self._lock:
+            return await self._cmd_unlocked(command, timeout=timeout, accept_call_progress=True)
