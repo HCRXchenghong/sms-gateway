@@ -28,7 +28,7 @@ from .routes_admin import router as admin_router
 from .routes_ai import router as ai_router
 from .routes_voice import router as voice_router
 from .routes_web import router as web_router
-from .voice.manager import CallManager
+from .voice.manager import CallManager, VoiceError
 from .voice.recorder import CallRecorder
 from .voice.state import CallSession
 from typing import Awaitable, Callable
@@ -237,11 +237,45 @@ async def lifespan(app: FastAPI):
     async def _persist_recording_path(call_id: str, path: str) -> None:
         await asyncio.to_thread(repo_calls.update_call, call_id, recording_path=path)
 
+    async def _persist_recording_meta(call_id: str, payload: dict) -> None:
+        await asyncio.to_thread(repo_calls.update_call, call_id, **payload)
+
+    async def _speak_into_call(device_id: int, text: str) -> None:
+        """Say something to the far end.
+
+        The module synthesiser is tried first because it needs no sound card.
+        Firmwares without the TTS voice bank reject AT+CTTS, and then the line
+        is rendered by the configured speech provider and played through the
+        card bound to that module, which reaches the call only when the card is
+        wired to the module audio port.
+        """
+        try:
+            await calls.speak(int(device_id), text)
+            return
+        except VoiceError as e:
+            log.info("module TTS unavailable for the recording notice: %s", e)
+        data = await ai_engine.synthesize(text)
+        target = Path(audio_player.prompt_dir) / "call_notice.wav"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(target.write_bytes, data)
+        result = await audio_player.play_file(target, wait=True, timeout=30, tag="call_notice")
+        if not result.ok:
+            raise RuntimeError(result.error or "播放录音提示失败")
+
     recorder = CallRecorder(
         audio_player,
         enabled=lambda: _flag_from_settings("audio.record_enabled", settings.audio_record_enabled),
         publish=hub.publish,
         persist=_persist_recording_path,
+        policy=lambda: str(repo_admin.get_setting("recording.policy") or settings.recording_policy),
+        default_enabled=lambda: _flag_from_settings(
+            "recording.default_enabled", settings.recording_default_enabled
+        ),
+        announce_default=lambda: _flag_from_settings(
+            "recording.announce", settings.recording_announce
+        ),
+        speak_into_call=_speak_into_call,
+        persist_meta=_persist_recording_meta,
     )
     # Let the console toggle win over the config default at runtime.
     audio_player.record_enabled = lambda: _flag_from_settings(

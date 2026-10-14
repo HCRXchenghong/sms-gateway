@@ -130,6 +130,50 @@ class Settings(BaseSettings):
     ai_auto_reply_sms: bool = False
     ai_auto_answer_call: bool = False
 
+    # Endpoint failover. Every capability keeps an ordered pool; a timeout,
+    # rate limit or 5xx opens the circuit for that endpoint and the request
+    # falls through to the next one. After the cooldown a single probe is let
+    # through, and success closes the circuit again.
+    ai_failover_enabled: bool = True
+    ai_breaker_failure_threshold: int = 3
+    ai_breaker_cooldown_seconds: float = 30.0
+    ai_call_log_retention_hours: int = 72
+
+    # Real-time translation. Mode is off | subtitle (translate the far end to
+    # text) | voice (play each side the other's language). Cadence is
+    # sentence (translate after a short utterance) or stream (translate while
+    # the other side is still speaking).
+    translate_mode: str = "off"
+    translate_cadence: str = "sentence"
+    translate_my_language: str = "zh"
+    translate_peer_language: str = "en"
+    # When no stream-capable endpoint survives failover, either drop back to
+    # sentence cadence or stop translating. Dropping back keeps the call
+    # usable; the console shows which one happened.
+    translate_stream_degrade_to_sentence: bool = True
+    translate_max_sentence_seconds: float = 12.0
+    translate_silence_end_seconds: float = 0.7
+
+    # Recording. Policy is forced | optional | disabled and decides whether
+    # audio is kept at all. Announcement is separate: silent keeps recording
+    # without telling the far end, announced plays a notice into the call.
+    recording_policy: str = "optional"
+    recording_announce: bool = False
+    recording_default_enabled: bool = True
+    # Text and minutes are independent of the audio file, so a call can be
+    # transcribed and summarised without keeping the recording.
+    transcript_save: bool = True
+    summary_save: bool = True
+    summary_auto_generate: bool = True
+
+    # Inbound handling: manual | auto_answer | auto_answer_ai.
+    inbound_mode: str = "manual"
+    inbound_auto_answer_delay_seconds: float = 3.0
+    inbound_ai_max_seconds: int = 300
+    # Outbound AI tasks hang up once the stated purpose is met, and never run
+    # longer than this even if the conversation is still going.
+    ai_call_max_seconds: int = 600
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "data.db"

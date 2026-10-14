@@ -181,11 +181,56 @@ CREATE TABLE IF NOT EXISTS call_sessions (
     transcript     TEXT,
     recording_path TEXT,
     owner_user_id  INTEGER REFERENCES users(id),
-    origin         TEXT
+    origin         TEXT,
+    -- How the recording decision was reached and what the far end was told.
+    -- Kept on the call row so an audit can show the notice text, when it was
+    -- played and whether playback actually succeeded.
+    recording_reason    TEXT,
+    recording_announced INTEGER NOT NULL DEFAULT 0,
+    recording_notice    TEXT,
+    recording_notice_at INTEGER,
+    recording_notice_ok INTEGER,
+    recording_notice_error TEXT,
+    -- Translation and minutes for this call.
+    translate_mode TEXT,
+    summary        TEXT,
+    summary_at     INTEGER,
+    -- Set when an AI task placed or handled the call.
+    task_id        INTEGER,
+    task_purpose   TEXT,
+    task_achieved  INTEGER,
+    task_result    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_calls_created ON call_sessions(created_at);
 CREATE INDEX IF NOT EXISTS idx_calls_device ON call_sessions(device_id);
 CREATE INDEX IF NOT EXISTS idx_calls_remote ON call_sessions(remote);
+
+CREATE TABLE IF NOT EXISTS ai_call_tasks (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    reference     TEXT UNIQUE,
+    device_id     INTEGER REFERENCES devices(id),
+    direction     TEXT NOT NULL DEFAULT 'outbound',
+    number        TEXT,
+    purpose       TEXT NOT NULL,
+    context       TEXT,
+    language      TEXT,
+    peer_language TEXT,
+    template      TEXT,
+    max_seconds   INTEGER,
+    status        TEXT NOT NULL DEFAULT 'queued',
+    call_id       TEXT,
+    result        TEXT,
+    achieved      INTEGER,
+    summary       TEXT,
+    error         TEXT,
+    created_by    TEXT,
+    owner_user_id INTEGER REFERENCES users(id),
+    created_at    INTEGER NOT NULL,
+    started_at    INTEGER,
+    finished_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ai_task_status ON ai_call_tasks(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_task_call ON ai_call_tasks(call_id);
 
 CREATE TABLE IF NOT EXISTS contacts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +252,45 @@ CREATE TABLE IF NOT EXISTS app_settings (
     secret     INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL
 );
+
+-- Per-capability model endpoints. One capability (speech recognition,
+-- translation, synthesis, call decisions, summaries) can have several
+-- endpoints behind it, tried in priority order, so a vendor that rate limits
+-- or times out falls through to the next one instead of breaking the call.
+-- "api" and "local" are the same OpenAI-compatible shape; the kind only tells
+-- the console whether the endpoint is an outside service or our own inference
+-- box.
+CREATE TABLE IF NOT EXISTS ai_endpoints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    capability      TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    kind            TEXT NOT NULL DEFAULT 'api',
+    base_url        TEXT NOT NULL DEFAULT '',
+    api_key_enc     BLOB,
+    model           TEXT NOT NULL DEFAULT '',
+    params          TEXT NOT NULL DEFAULT '{}',
+    priority        INTEGER NOT NULL DEFAULT 100,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    supports_stream INTEGER NOT NULL DEFAULT 0,
+    timeout_seconds REAL NOT NULL DEFAULT 30.0,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_endpoint_cap ON ai_endpoints(capability, priority, id);
+
+CREATE TABLE IF NOT EXISTS ai_call_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    capability    TEXT NOT NULL,
+    endpoint_id   INTEGER,
+    endpoint_name TEXT,
+    ok            INTEGER NOT NULL,
+    latency_ms    INTEGER,
+    error         TEXT,
+    call_id       TEXT,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_call_log_created ON ai_call_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_call_log_endpoint ON ai_call_log(endpoint_id, created_at);
 
 CREATE TABLE IF NOT EXISTS conversations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -328,6 +412,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("totp_last_step", "ALTER TABLE users ADD COLUMN totp_last_step INTEGER"),
     ):
         if column not in user_cols:
+            conn.execute(ddl)
+
+    call_cols = columns("call_sessions")
+    for column, ddl in (
+        ("recording_reason", "ALTER TABLE call_sessions ADD COLUMN recording_reason TEXT"),
+        ("recording_announced", "ALTER TABLE call_sessions ADD COLUMN recording_announced INTEGER NOT NULL DEFAULT 0"),
+        ("recording_notice", "ALTER TABLE call_sessions ADD COLUMN recording_notice TEXT"),
+        ("recording_notice_at", "ALTER TABLE call_sessions ADD COLUMN recording_notice_at INTEGER"),
+        ("recording_notice_ok", "ALTER TABLE call_sessions ADD COLUMN recording_notice_ok INTEGER"),
+        ("recording_notice_error", "ALTER TABLE call_sessions ADD COLUMN recording_notice_error TEXT"),
+        ("translate_mode", "ALTER TABLE call_sessions ADD COLUMN translate_mode TEXT"),
+        ("summary", "ALTER TABLE call_sessions ADD COLUMN summary TEXT"),
+        ("summary_at", "ALTER TABLE call_sessions ADD COLUMN summary_at INTEGER"),
+        ("task_id", "ALTER TABLE call_sessions ADD COLUMN task_id INTEGER"),
+        ("task_purpose", "ALTER TABLE call_sessions ADD COLUMN task_purpose TEXT"),
+        ("task_achieved", "ALTER TABLE call_sessions ADD COLUMN task_achieved INTEGER"),
+        ("task_result", "ALTER TABLE call_sessions ADD COLUMN task_result TEXT"),
+    ):
+        if column not in call_cols:
             conn.execute(ddl)
 
 

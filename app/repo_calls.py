@@ -65,6 +65,19 @@ def update_call(
     tts_log: Optional[list] = None,
     transcript: Optional[list] = None,
     recording_path: Optional[str] = None,
+    recording_reason: Optional[str] = None,
+    recording_announced: Optional[bool] = None,
+    recording_notice: Optional[str] = None,
+    recording_notice_at: Optional[int] = None,
+    recording_notice_ok: Optional[bool] = None,
+    recording_notice_error: Optional[str] = None,
+    translate_mode: Optional[str] = None,
+    summary: Optional[dict] = None,
+    summary_at: Optional[int] = None,
+    task_id: Optional[int] = None,
+    task_purpose: Optional[str] = None,
+    task_achieved: Optional[bool] = None,
+    task_result: Optional[str] = None,
 ) -> None:
     fields: list[str] = []
     params: list[object] = []
@@ -98,6 +111,45 @@ def update_call(
     if recording_path is not None:
         fields.append("recording_path = ?")
         params.append(recording_path)
+    if recording_reason is not None:
+        fields.append("recording_reason = ?")
+        params.append(recording_reason)
+    if recording_announced is not None:
+        fields.append("recording_announced = ?")
+        params.append(1 if recording_announced else 0)
+    if recording_notice is not None:
+        fields.append("recording_notice = ?")
+        params.append(recording_notice)
+    if recording_notice_at is not None:
+        fields.append("recording_notice_at = ?")
+        params.append(recording_notice_at)
+    if recording_notice_ok is not None:
+        fields.append("recording_notice_ok = ?")
+        params.append(1 if recording_notice_ok else 0)
+    if recording_notice_error is not None:
+        fields.append("recording_notice_error = ?")
+        params.append(recording_notice_error[:300])
+    if translate_mode is not None:
+        fields.append("translate_mode = ?")
+        params.append(translate_mode)
+    if summary is not None:
+        fields.append("summary = ?")
+        params.append(json.dumps(summary, ensure_ascii=False))
+    if summary_at is not None:
+        fields.append("summary_at = ?")
+        params.append(summary_at)
+    if task_id is not None:
+        fields.append("task_id = ?")
+        params.append(task_id)
+    if task_purpose is not None:
+        fields.append("task_purpose = ?")
+        params.append(task_purpose)
+    if task_achieved is not None:
+        fields.append("task_achieved = ?")
+        params.append(1 if task_achieved else 0)
+    if task_result is not None:
+        fields.append("task_result = ?")
+        params.append(task_result)
     if not fields:
         return
     params.append(call_id)
@@ -173,8 +225,25 @@ def serialize_call(row: sqlite3.Row) -> dict:
         except (ValueError, TypeError):
             return []
 
-    number = row["device_number"]
-    label = row["device_label"]
+    def _field(key: str, default=None):
+        # Rows fetched without the device join do not carry every column, and a
+        # database written before an upgrade may lack the newer ones.
+        try:
+            value = row[key]
+        except (IndexError, KeyError):
+            return default
+        return default if value is None else value
+
+    summary_raw = _field("summary")
+    summary = None
+    if summary_raw:
+        try:
+            summary = json.loads(summary_raw)
+        except (ValueError, TypeError):
+            summary = {"summary": str(summary_raw), "parsed": False}
+    notice_ok = _field("recording_notice_ok")
+    number = _field("device_number")
+    label = _field("device_label")
     return {
         "id": row["id"],
         "call_id": row["call_id"],
@@ -201,6 +270,19 @@ def serialize_call(row: sqlite3.Row) -> dict:
         "recording_path": row["recording_path"],
         "owner_user_id": row["owner_user_id"],
         "origin": row["origin"],
+        "recording_reason": _field("recording_reason"),
+        "recording_announced": bool(_field("recording_announced", 0)),
+        "recording_notice": _field("recording_notice"),
+        "recording_notice_at": _field("recording_notice_at"),
+        "recording_notice_ok": None if notice_ok is None else bool(notice_ok),
+        "recording_notice_error": _field("recording_notice_error"),
+        "translate_mode": _field("translate_mode"),
+        "summary": summary,
+        "summary_at": _field("summary_at"),
+        "task_id": _field("task_id"),
+        "task_purpose": _field("task_purpose"),
+        "task_achieved": _field("task_achieved"),
+        "task_result": _field("task_result"),
     }
 
 

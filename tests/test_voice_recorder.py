@@ -78,7 +78,12 @@ def test_disabled_gate_never_opens_a_capture(tmp_path):
     assert player.started == []
     assert run(recorder.on_state("ended", {"call_id": "c1"})) is None
     assert persisted == []
-    assert events == []
+    # No capture is opened and nothing is persisted, but the console is told
+    # that recording was wanted and could not happen. Silently skipping it is
+    # how a "forced recording" policy ends up capturing nothing unnoticed.
+    assert [e[1]["phase"] for e in events] == ["unavailable"]
+    assert events[0][1]["failed_reason"] == "audio_capture_disabled"
+    assert events[0][1]["recording"] is False
 
 
 def test_empty_capture_is_dropped_instead_of_persisted(tmp_path):
@@ -159,3 +164,137 @@ def test_call_lifecycle_wires_capture_without_an_active_prompt(
         assert client.get(url, headers=admin_headers).status_code == 404
     finally:
         clear_call(client, admin_headers, online_device_id)
+
+
+# ---------------------------------------------------------------------------
+# Recording policy: capture and announcement are two independent switches
+# ---------------------------------------------------------------------------
+
+
+def make_policy_recorder(tmp_path, *, policy, default_enabled=True, announce_default=False,
+                         speak=None, capture_enabled=True):
+    player = StubPlayer()
+    events = []
+    meta = []
+    spoken = []
+
+    async def publish(name, payload):
+        events.append((name, payload))
+
+    async def speak_into_call(device_id, text):
+        spoken.append((device_id, text))
+        if speak == "fail":
+            raise RuntimeError("module rejected the TTS command")
+
+    recorder = CallRecorder(
+        player,
+        enabled=lambda: capture_enabled,
+        publish=publish,
+        persist=lambda call_id, path: None,
+        record_dir=tmp_path,
+        policy=lambda: policy,
+        default_enabled=lambda: default_enabled,
+        announce_default=lambda: announce_default,
+        speak_into_call=speak_into_call,
+        persist_meta=lambda call_id, payload: meta.append((call_id, payload)),
+    )
+    return recorder, player, events, meta, spoken
+
+
+def test_forced_policy_overrides_an_operator_asking_not_to_record(tmp_path):
+    recorder, player, _, _, _ = make_policy_recorder(tmp_path, policy="forced")
+    run(recorder.on_state("active", {"call_id": "f1", "device_id": 2, "record": False}))
+    assert recorder.is_recording("f1")
+    assert len(player.started) == 1
+    decision = recorder.decide(requested=False)
+    assert decision.record is True and decision.can_change is False
+
+
+def test_disabled_policy_refuses_to_record_even_when_asked(tmp_path):
+    recorder, player, events, _, _ = make_policy_recorder(tmp_path, policy="disabled")
+    assert run(recorder.on_state("active", {"call_id": "d1", "device_id": 2, "record": True})) is None
+    assert player.started == []
+    assert not recorder.is_recording("d1")
+    assert [e[1]["phase"] for e in events] == ["skipped"]
+    assert recorder.decide(requested=True).record is False
+
+
+def test_optional_policy_follows_the_request_and_the_default(tmp_path):
+    recorder, player, _, _, _ = make_policy_recorder(tmp_path, policy="optional", default_enabled=False)
+    assert recorder.decide().record is False
+    assert recorder.decide(requested=True).record is True
+    run(recorder.on_state("active", {"call_id": "o1", "device_id": 2, "record": True}))
+    assert recorder.is_recording("o1")
+    run(recorder.stop("o1"))
+    run(recorder.on_state("active", {"call_id": "o2", "device_id": 2}))
+    assert not recorder.is_recording("o2")
+
+
+def test_announced_recording_plays_a_plain_notice_into_the_call(tmp_path):
+    recorder, _, events, meta, spoken = make_policy_recorder(
+        tmp_path, policy="forced", announce_default=True
+    )
+    run(recorder.on_state("active", {"call_id": "a1", "device_id": 7}))
+    assert spoken == [(7, "本次通话已开启录音")]
+    # The wording states the fact of recording and claims nothing about it.
+    text = spoken[0][1]
+    for banned in ("证词", "证据", "法律", "法庭", "有效"):
+        assert banned not in text
+    assert [e[1]["phase"] for e in events][:3] == ["started", "announced"]
+    stored = dict(meta[-1][1])
+    assert stored["recording_announced"] is True
+    assert stored["recording_notice_ok"] is True
+    assert stored["recording_notice"] == text
+
+
+def test_mid_call_notice_uses_its_own_wording(tmp_path):
+    recorder, _, _, _, spoken = make_policy_recorder(
+        tmp_path, policy="optional", announce_default=True
+    )
+    run(recorder.on_state("active", {"call_id": "m1", "device_id": 4}))
+    run(recorder.stop("m1"))
+    spoken.clear()
+    run(recorder.set_recording("m1", True, device_id=4))
+    assert spoken == [(4, "录音已开启，接下来的通话将被记录")]
+
+
+def test_a_notice_that_failed_to_play_is_not_recorded_as_announced(tmp_path):
+    recorder, _, events, meta, spoken = make_policy_recorder(
+        tmp_path, policy="forced", announce_default=True, speak="fail"
+    )
+    run(recorder.on_state("active", {"call_id": "n1", "device_id": 9}))
+    assert spoken and recorder.is_recording("n1")
+    assert "announced" not in [e[1]["phase"] for e in events]
+    assert "announce_failed" in [e[1]["phase"] for e in events]
+    stored = dict(meta[-1][1])
+    assert stored["recording_notice_ok"] is False
+    assert "module rejected" in stored["recording_notice_error"]
+
+
+def test_silent_recording_says_nothing_but_still_shows_in_the_console(tmp_path):
+    recorder, _, events, _, spoken = make_policy_recorder(
+        tmp_path, policy="optional", announce_default=False
+    )
+    run(recorder.on_state("active", {"call_id": "s1", "device_id": 5}))
+    assert spoken == []
+    assert recorder.is_recording("s1")
+    assert [e[1]["phase"] for e in events] == ["started"]
+
+
+def test_operator_toggle_is_refused_under_a_forced_policy(tmp_path):
+    recorder, _, _, _, _ = make_policy_recorder(tmp_path, policy="forced")
+    run(recorder.on_state("active", {"call_id": "t1", "device_id": 1}))
+    result = run(recorder.set_recording("t1", False, device_id=1))
+    assert result["ok"] is False
+    assert result["recording"] is True
+    assert recorder.is_recording("t1")
+
+
+def test_forced_recording_without_a_capture_device_is_reported_loudly(tmp_path):
+    recorder, _, events, _, _ = make_policy_recorder(
+        tmp_path, policy="forced", capture_enabled=False
+    )
+    run(recorder.on_state("active", {"call_id": "x1", "device_id": 1}))
+    assert [e[1]["phase"] for e in events] == ["unavailable"]
+    assert events[0][1]["reason"] == "policy_forced"
+    assert events[0][1]["failed_reason"] == "audio_capture_disabled"

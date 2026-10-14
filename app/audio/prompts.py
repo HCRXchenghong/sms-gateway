@@ -54,7 +54,11 @@ PROMPTS: List[PromptSpec] = [
     PromptSpec("call_ended", "通话已结束", "click", 1, "call", "正常挂断"),
     PromptSpec("call_error", "呼叫失败，请检查设备状态", "error", 1, "call", "指令错误或模块离线"),
     PromptSpec("call_hold", "通话已保持，请稍候", "hold", 2, "call", "通话保持"),
-    PromptSpec("recording_notice", "本次通话可能被录音", "beep", 1, "compliance", "开启录音时的合规播报"),
+    # The notice states the fact of recording and nothing else. It must not
+    # claim the recording is evidence or legally binding, so the wording is
+    # deliberately plain.
+    PromptSpec("recording_notice", "本次通话已开启录音", "beep", 1, "compliance", "接通时告知对方本次通话正在录音"),
+    PromptSpec("recording_notice_mid", "录音已开启，接下来的通话将被记录", "beep", 1, "compliance", "通话中途开启录音时告知对方"),
     PromptSpec("ai_thinking", "正在为您处理，请稍候", "double_beep", 1, "ai", "AI 生成回复期间的等待音"),
     PromptSpec("ai_handover", "正在为您转接智能助理", "success", 1, "ai", "通话交给 AI 接管"),
     PromptSpec("sms_sent", "短信发送成功", "success", 1, "sms", "短信发送完成"),

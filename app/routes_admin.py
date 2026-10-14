@@ -41,6 +41,29 @@ EDITABLE_SETTINGS = {
     "ai.tts.format": str,
     "ai.auto_reply_sms": bool,
     "ai.auto_answer_call": bool,
+    # Endpoint pool behaviour
+    "ai.failover_enabled": bool,
+    "ai.breaker.failure_threshold": int,
+    "ai.breaker.cooldown_seconds": float,
+    "ai.call_log_retention_hours": int,
+    "ai.call_max_seconds": int,
+    # Real-time translation
+    "translate.mode": str,
+    "translate.cadence": str,
+    "translate.my_language": str,
+    "translate.peer_language": str,
+    "translate.stream_degrade_to_sentence": bool,
+    # Recording, transcript and minutes are three independent switches
+    "recording.policy": str,
+    "recording.announce": bool,
+    "recording.default_enabled": bool,
+    "transcript.save": bool,
+    "summary.save": bool,
+    "summary.auto_generate": bool,
+    # Inbound handling
+    "inbound.mode": str,
+    "inbound.auto_answer_delay_seconds": float,
+    "inbound.ai_max_seconds": int,
 }
 
 SECRET_SETTINGS = {
@@ -304,7 +327,25 @@ async def admin_put_settings(body: SettingsBody, request: Request, user: Current
 
 
 async def _apply_settings(request: Request) -> None:
-    """Push persisted settings into the live audio and AI subsystems."""
+    """Push persisted settings into the running process.
+
+    Every editable key maps onto the settings singleton by turning dots into
+    underscores, so code reading settings.translate_mode sees a console change
+    without a restart. Audio and AI additionally rebuild their clients, and the
+    endpoint router reloads its pool.
+    """
+    stored = await asyncio.to_thread(repo_admin.list_settings)
+    for key, caster in EDITABLE_SETTINGS.items():
+        raw = stored.get(key)
+        if raw is None:
+            continue
+        attr = key.replace(".", "_")
+        if not hasattr(settings, attr):
+            continue
+        try:
+            setattr(settings, attr, _coerce(raw, caster))
+        except (TypeError, ValueError):
+            continue
     audio = getattr(request.app.state, "audio", None)
     if audio is not None:
         await audio.load()
@@ -338,7 +379,11 @@ def _default_for(key: str):
         "ai.auto_reply_sms": settings.ai_auto_reply_sms,
         "ai.auto_answer_call": settings.ai_auto_answer_call,
     }
-    return mapping.get(key)
+    if key in mapping:
+        return mapping[key]
+    # Keys added later follow the dotted-name convention, so they resolve
+    # without another entry in the table above.
+    return getattr(settings, key.replace(".", "_"), None)
 
 
 def _coerce(raw, caster):
