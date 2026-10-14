@@ -237,6 +237,36 @@ class AudioPlayer:
             argv=argv, returncode=code, error=detail or None,
         )
 
+    async def play_bytes(
+        self,
+        data: bytes,
+        *,
+        tag: str = "audio_bytes",
+        device: Optional[str] = None,
+        volume: Optional[float] = None,
+        wait: bool = True,
+        timeout: float = 60.0,
+    ) -> PlayResult:
+        """Play rendered speech that only exists in memory.
+
+        Cloud TTS returns bytes and the callers that need them (translation, the
+        call agent) run per call, so the clip is written to a per-tag file and
+        played from there. One file per tag keeps two calls from overwriting each
+        other mid-playback.
+        """
+        if not data:
+            return PlayResult(ok=False, path="", backend=self._backend, error="empty audio")
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in tag)[:60] or "clip"
+        target = Path(self._prompt_dir) / f"_live_{safe}.wav"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(target.write_bytes, data)
+        except OSError as e:
+            return PlayResult(ok=False, path=str(target), backend=self._backend, error=str(e))
+        return await self.play_file(
+            target, device=device, volume=volume, wait=wait, timeout=timeout, tag=tag
+        )
+
     async def play_prompt(
         self,
         prompt_id: str,
