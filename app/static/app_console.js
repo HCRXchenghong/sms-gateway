@@ -869,7 +869,7 @@
         if (!confirm('清除「' + u.username + '」的双因子设置？')) return;
         try {
             await post('/app/admin/users/' + u.id + '/totp/reset', {});
-            note('#account-status', '已清除双因子，用户下次登录需重新绑定');
+            note('#account-status', '已清除双因子，已关闭，可登录后台自行开启');
             refreshUsers();
         } catch (e) { note('#account-status', e.message, true); }
     }
@@ -976,6 +976,61 @@
         refreshAudit();
     }
 
+    async function refreshTotp() {
+        if (!$('#totp-current')) return;
+        try {
+            var d = await json('/app/account/totp');
+            state.totpEnabled = d.totp_enabled;
+            $('#totp-current').textContent = d.totp_enabled ? '当前状态：已开启' : '当前状态：未开启';
+            $('#totp-off').style.display = d.totp_enabled ? 'none' : '';
+            $('#totp-on').style.display = d.totp_enabled ? '' : 'none';
+            $('#totp-enrolling').style.display = 'none';
+        } catch (err) { note('#totp-status', err.message, true); }
+    }
+
+    function initSecurityTab() {
+        if (!$('#totp-setup-form')) return;
+        refreshTotp();
+        var cancel = $('#totp-cancel');
+        if (cancel) cancel.addEventListener('click', refreshTotp);
+        $('#totp-setup-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            try {
+                var d = await post('/app/account/totp/setup', { current_password: e.target.elements.current_password.value });
+                $('#totp-qr').src = d.qr_data_url;
+                $('#totp-secret').textContent = '手动密钥：' + d.secret;
+                $('#totp-off').style.display = 'none';
+                $('#totp-enrolling').style.display = '';
+                note('#totp-status', '');
+            } catch (err) { note('#totp-status', err.message, true); }
+        });
+        $('#totp-confirm-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            try {
+                var d = await post('/app/account/totp/confirm', { code: e.target.elements.code.value });
+                state.recoveryCodes = d.recovery_codes || [];
+                $('#recovery-list').innerHTML = '';
+                state.recoveryCodes.forEach(function(code) {
+                    $('#recovery-list').appendChild(el('li', null, code));
+                });
+                $('#recovery-modal').hidden = false;
+                await refreshTotp();
+                refreshAudit();
+            } catch (err) { note('#totp-status', err.message, true); }
+        });
+        $('#totp-disable-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            var f = e.target;
+            try {
+                await post('/app/account/totp/disable', { current_password: f.elements.current_password.value, code: f.elements.code.value });
+                f.reset();
+                await refreshTotp();
+                note('#totp-status', '已关闭两步验证');
+                refreshAudit();
+            } catch (err) { note('#totp-status', err.message, true); }
+        });
+    }
+
     async function refreshAudit() {
         var tbody = $('#audit-table tbody');
         if (!tbody) return;
@@ -1009,7 +1064,8 @@
         initCallsTab();
         initAudioTab();
         initAiTab();
-        initAccountsTab();
+        initSecurityTab();
+    initAccountsTab();
 
         await refreshDevices();
         await refreshAudio();

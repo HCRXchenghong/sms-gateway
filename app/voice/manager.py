@@ -205,7 +205,11 @@ class CallManager:
             owner_user_id=owner_user_id,
             origin=origin,
         )
-        machine = CallStateMachine(session)
+        machine = CallStateMachine(
+            session,
+            clcc_absent_grace=settings.voice_clcc_absent_grace_seconds,
+            clcc_absent_threshold=settings.voice_clcc_absent_threshold,
+        )
         self._sessions[int(device_id)] = machine
         self._by_call_id[call_id] = machine
         return machine
@@ -235,12 +239,18 @@ class CallManager:
                 device_id, CallDirection.OUTBOUND, number, owner_user_id, origin or "api"
             )
             await self._apply(machine.start_outbound(number))
+            # ATD blocks until the far end answers or the dial fails, and the
+            # module reports no CLCC rows until then.
+            machine.hold_absent_detection()
         try:
             await modem.dial(number)
         except Exception as e:
             async with self._lock:
                 await self._apply(machine.handle_error(str(e)))
             raise VoiceError(str(e))
+        # The hold stays up until the module confirms the call with a real CLCC
+        # row, or until it times out. ATD returning OK only means the dial was
+        # accepted, not that the module is ready to report the call.
         return machine.session
 
     async def answer(self, device_id: int) -> CallSession:
@@ -251,6 +261,10 @@ class CallManager:
             machine = self._sessions.get(int(device_id))
             if not machine or machine.session.state != CallState.INCOMING:
                 raise VoiceError(f"no incoming call on device {device_id}")
+            # ATA is the window where the A7670 answers AT+CLCC with zero rows.
+            # Without this hold the poll loop booked the call as hung up in the
+            # same second it was picked up, and the app dropped the call screen.
+            machine.hold_absent_detection()
         try:
             await modem.answer()
         except Exception as e:
@@ -259,6 +273,9 @@ class CallManager:
             raise VoiceError(str(e))
         async with self._lock:
             await self._apply(machine.handle_answer())
+            # Same reasoning as dial: ATA returning OK is not proof the module
+            # will answer AT+CLCC yet, so keep ignoring empty replies until a
+            # real row shows up.
         return machine.session
 
     async def hangup(self, device_id: int) -> None:
@@ -267,6 +284,11 @@ class CallManager:
             machine = self._sessions.get(int(device_id))
             if not machine or machine.session.state in (CallState.IDLE, CallState.ENDED):
                 return
+            # Stamp the intent before the command goes out. The module replies
+            # with +CEND / NO CARRIER and those URCs can be processed before
+            # this coroutine resumes, which used to book our own hangup as the
+            # far end hanging up.
+            machine.request_local_hangup()
         if modem is not None and modem.connected:
             try:
                 await modem.hangup()
@@ -351,7 +373,13 @@ class CallManager:
             async with self._lock:
                 await self._apply(machine.handle_timeout())
             return
-        rows = await modem.list_calls()
+        try:
+            rows = await modem.list_calls()
+        except ModemError as e:
+            # A failed poll says nothing about the call. Treating it as "no rows"
+            # turned every transient serial hiccup into a phantom hangup.
+            log.debug("clcc poll error for %s: %s", device_id, e)
+            return
         async with self._lock:
             if not rows:
                 await self._apply(machine.handle_clcc_absent())

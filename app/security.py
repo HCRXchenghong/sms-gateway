@@ -1,6 +1,7 @@
 """Password / TOTP / API-key cryptographic helpers."""
 from __future__ import annotations
 
+import binascii
 import hashlib
 import hmac
 import os
@@ -91,9 +92,35 @@ def totp_provisioning_uri(secret: str, username: str, issuer: str = "SMS-Gateway
 
 
 def verify_totp(secret: str, code: str, drift: int = 1) -> bool:
+    """Return False for malformed input instead of raising."""
+    return verify_totp_step(secret, code, drift) is not None
+
+
+def verify_totp_step(secret: str, code: str, drift: int = 1) -> Optional[int]:
+    """Return the time step a code belongs to, or None when it does not match.
+
+    Callers that must refuse a reused code need the step, not just a yes/no:
+    recording the last accepted step is what stops a code that was already
+    spent during enrollment from logging the account in again.
+    """
     if not code or not code.isdigit() or len(code) != 6:
-        return False
-    return pyotp.TOTP(secret).verify(code, valid_window=drift)
+        return None
+    try:
+        totp = pyotp.TOTP(secret)
+    except (ValueError, TypeError, binascii.Error):
+        return None
+    now = time.time()
+    for offset in range(-abs(int(drift)), abs(int(drift)) + 1):
+        when = now + offset * totp.interval
+        try:
+            candidate = str(totp.at(when))
+        except (ValueError, TypeError, binascii.Error):
+            return None
+        if hmac.compare_digest(candidate, code):
+            # pyotp.timecode() only accepts datetime; TOTP.at() already derived
+            # this step from the raw timestamp, so derive it the same way.
+            return int(when // totp.interval)
+    return None
 
 
 def generate_recovery_codes(count: int) -> Tuple[list[str], list[str]]:

@@ -32,7 +32,7 @@ class LoginBody(BaseModel):
 async def auth_login(body: LoginBody, request: Request):
     result = await authenticate(request, body.username, body.password, body.code, body.recovery)
     if not result.ok:
-        raise HTTPException(result.status_code, {"error": {"code": "login_failed", "message": result.error}})
+        raise HTTPException(result.status_code, {"error": {"code": result.code, "message": result.error}})
     sid, max_age = await issue_session(result.user, request, mobile=True)
     return {
         "token": sid,

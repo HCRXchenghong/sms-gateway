@@ -10,9 +10,14 @@ from app.voice.state import (
 )
 
 
-def _machine(direction=CallDirection.OUTBOUND) -> CallStateMachine:
+def _machine(direction=CallDirection.OUTBOUND, *, trust_first_poll=False) -> CallStateMachine:
+    """Build a machine. Empty-CLCC detection is debounced by default, matching
+    production; pass trust_first_poll to exercise the end-of-call path directly."""
+    kwargs = {}
+    if trust_first_poll:
+        kwargs = {"clcc_absent_grace": 0.0, "clcc_absent_threshold": 1}
     return CallStateMachine(
-        CallSession(call_id="c1", device_id=1, direction=direction)
+        CallSession(call_id="c1", device_id=1, direction=direction), **kwargs
     )
 
 
@@ -69,7 +74,7 @@ def test_incoming_reject_reports_rejected():
 
 
 def test_remote_hangup_after_answer():
-    machine = _machine()
+    machine = _machine(trust_first_poll=True)
     machine.start_outbound("138")
     machine.handle_clcc("0")
     machine.handle_clcc_absent()
@@ -77,10 +82,132 @@ def test_remote_hangup_after_answer():
 
 
 def test_clcc_absent_before_answer_is_no_carrier():
-    machine = _machine()
+    machine = _machine(trust_first_poll=True)
     machine.start_outbound("138")
     machine.handle_clcc_absent()
     assert machine.session.end_reason == EndReason.NO_CARRIER
+
+
+def test_single_empty_clcc_does_not_end_an_answered_call():
+    """Regression: the A7670 answers AT+CLCC with no rows for a moment while it
+    finishes ATA. That one sample used to end the call in the same second it was
+    picked up, so the app lost the call screen on inbound calls."""
+    machine = _machine(CallDirection.INBOUND)
+    machine.handle_urc("ring", "138")
+    machine.handle_answer()
+    assert machine.session.state == CallState.ACTIVE
+    machine._changed_at -= 60  # let the grace window expire
+    assert machine.handle_clcc_absent() == []
+    assert machine.session.state == CallState.ACTIVE
+    assert machine.session.ended_at is None
+    # The next real row confirms the call is alive.
+    machine.handle_clcc("0", "138")
+    assert machine.session.state == CallState.ACTIVE
+
+
+def test_sustained_empty_clcc_still_ends_the_call():
+    machine = _machine()
+    machine.clcc_absent_grace = 0.0
+    machine.clcc_absent_threshold = 3
+    machine.handle_urc("ring", "138")
+    machine.handle_answer()
+    assert machine.handle_clcc_absent() == []
+    assert machine.handle_clcc_absent() == []
+    assert machine.session.state == CallState.ACTIVE
+    assert machine.handle_clcc_absent()[0].to_state == CallState.ENDED
+    assert machine.session.end_reason == EndReason.REMOTE_HANGUP
+
+
+def test_empty_clcc_inside_grace_window_is_ignored():
+    machine = _machine()
+    machine.clcc_absent_threshold = 1
+    machine.handle_urc("ring", "138")
+    machine.handle_answer()
+    # Grace has not expired yet, so even a threshold of one must not fire.
+    assert machine.handle_clcc_absent() == []
+    assert machine.session.state == CallState.ACTIVE
+
+
+def test_answer_command_holds_absent_detection():
+    machine = _machine(CallDirection.INBOUND)
+    machine.handle_urc("ring", "138")
+    machine.hold_absent_detection()
+    machine._changed_at -= 60
+    for _ in range(10):
+        assert machine.handle_clcc_absent() == []
+    assert machine.session.state == CallState.INCOMING
+    machine.handle_answer()
+    assert machine.session.state == CallState.ACTIVE
+    # The hold survives the transition: ATA answering OK does not mean the
+    # module is ready to report the call on AT+CLCC yet.
+    machine._changed_at -= 60
+    machine.clcc_absent_threshold = 1
+    assert machine.handle_clcc_absent() == []
+    assert machine.session.state == CallState.ACTIVE
+    # A real row lifts the hold, and empty replies become a fallback again.
+    machine.handle_clcc("0", "138")
+    machine._changed_at -= 60
+    assert machine.handle_clcc_absent()[0].to_state == CallState.ENDED
+
+
+def test_absent_detection_hold_expires():
+    """A firmware that never reports a CLCC row must not keep a call alive forever."""
+    machine = _machine(CallDirection.INBOUND, trust_first_poll=True)
+    machine.clcc_absent_hold_timeout = 0.0
+    machine.handle_urc("ring", "138")
+    machine.handle_answer()
+    machine.hold_absent_detection()
+    assert machine.handle_clcc_absent()[0].to_state == CallState.ENDED
+
+
+def test_cend_ends_an_active_call_as_remote_hangup():
+    """Regression: +CEND / VOICE CALL: END were parsed but never applied, so a
+    call the far end released stayed on screen until NO CARRIER arrived, and
+    stayed forever on firmwares that only send +CEND."""
+    machine = _machine()
+    machine.start_outbound("138")
+    machine.handle_clcc("0")
+    transitions = machine.handle_urc("cend")
+    assert transitions[0].to_state == CallState.ENDED
+    assert transitions[0].trigger == "cend"
+    assert machine.session.end_reason == EndReason.REMOTE_HANGUP
+    # NO CARRIER follows and must not overwrite the attribution.
+    assert machine.handle_urc("no_carrier") == []
+    assert machine.session.end_reason == EndReason.REMOTE_HANGUP
+
+
+def test_cend_before_answer_is_a_missed_call():
+    machine = _machine(CallDirection.INBOUND)
+    machine.handle_urc("ring", "138")
+    machine.handle_urc("cend")
+    assert machine.session.end_reason == EndReason.NO_ANSWER
+    assert machine.session.answered_at is None
+
+
+def test_local_hangup_intent_wins_over_cend():
+    machine = _machine()
+    machine.start_outbound("138")
+    machine.handle_clcc("0")
+    machine.request_local_hangup()
+    machine.handle_urc("cend")
+    assert machine.session.end_reason == EndReason.LOCAL_HANGUP
+
+
+def test_local_hangup_intent_applies_to_no_carrier():
+    machine = _machine()
+    machine.start_outbound("138")
+    machine.handle_clcc("0")
+    machine.request_local_hangup()
+    machine.handle_urc("no_carrier")
+    assert machine.session.end_reason == EndReason.LOCAL_HANGUP
+
+
+def test_dial_failure_reasons_are_untouched_by_local_intent():
+    machine = _machine()
+    machine.start_outbound("138")
+    machine.request_local_hangup()
+    machine.handle_urc("busy")
+    assert machine.session.end_reason == EndReason.BUSY
 
 
 def test_ended_is_terminal():

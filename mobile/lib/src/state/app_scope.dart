@@ -70,6 +70,7 @@ class AppScope extends ChangeNotifier {
   UserProfile? _user;
   Capabilities _caps = Capabilities();
   String? _loginError;
+  String? loginErrorCode;
   bool _restoring = false;
 
   AuthPhase get phase => _phase;
@@ -174,6 +175,7 @@ class AppScope extends ChangeNotifier {
     String recovery = '',
   }) async {
     _loginError = null;
+    loginErrorCode = null;
     notifyListeners();
     final normalized = SessionStore.normalizeUrl(serverUrl);
     if (normalized.isEmpty) {
@@ -202,6 +204,7 @@ class AppScope extends ChangeNotifier {
       return true;
     } on ApiException catch (e) {
       _loginError = e.message;
+      loginErrorCode = e.code;
       _phase = AuthPhase.loggedOut;
       notifyListeners();
       return false;

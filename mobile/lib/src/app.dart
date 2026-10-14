@@ -89,30 +89,31 @@ class _AuthedShell extends StatefulWidget {
 }
 
 class _AuthedShellState extends State<_AuthedShell> {
-  bool _inCallRouteOpen = false;
+  String? _presentedCallId;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _sync(context.read<AppScope>()));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _sync(context.read<AppScope>());
+    });
   }
 
   void _sync(AppScope scope) {
     final call = scope.calls.foreground;
-    final shouldShow = call != null && !call.isEnded;
-    if (shouldShow && !_inCallRouteOpen) {
-      _inCallRouteOpen = true;
+    if (call != null && !call.isEnded && _presentedCallId == null) {
+      final id = call.callId;
+      _presentedCallId = id;
       Navigator.of(context, rootNavigator: true)
-          .push(MaterialPageRoute<void>(
-            fullscreenDialog: true,
-            builder: (_) => InCallPage(callId: call.callId),
-          ))
+          .push<void>(MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => InCallPage(callId: id),
+      ))
           .then((_) {
-        if (mounted) setState(() => _inCallRouteOpen = false);
+        if (mounted && _presentedCallId == id) {
+          setState(() => _presentedCallId = null);
+        }
       });
-    } else if (!shouldShow && _inCallRouteOpen) {
-      _inCallRouteOpen = false;
-      Navigator.of(context, rootNavigator: true).popUntil((r) => r.isFirst);
     }
   }
 
@@ -120,7 +121,6 @@ class _AuthedShellState extends State<_AuthedShell> {
   Widget build(BuildContext context) {
     return Consumer<AppScope>(
       builder: (context, scope, _) {
-        // Re-evaluate the call overlay whenever call state changes.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _sync(scope);
         });

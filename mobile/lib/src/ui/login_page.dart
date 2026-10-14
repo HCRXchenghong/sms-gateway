@@ -52,7 +52,7 @@ class _LoginPageState extends State<LoginPage> {
     if (!mounted) return;
     setState(() {
       _busy = false;
-      _needTotp = !ok && (scope.loginError ?? '').contains('totp');
+      _needTotp = !ok && (scope.loginErrorCode ?? '').startsWith('totp_');
     });
     if (!ok) {
       ScaffoldMessenger.of(context)

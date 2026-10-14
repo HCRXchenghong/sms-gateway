@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 
 import '../data/api_client.dart';
 import '../data/models.dart';
+import 'call_session_registry.dart';
 import '../data/realtime_client.dart';
 
 /// Base class holding the busy/error flags every controller needs.
@@ -126,6 +127,7 @@ class DevicesController extends BaseController {
 class CallsController extends BaseController {
   CallsController(super.api);
 
+  final CallSessionRegistry registry = CallSessionRegistry();
   List<CallSession> _active = [];
   List<CallRecord> _history = [];
   bool _voiceEnabled = true;
@@ -167,7 +169,11 @@ class CallsController extends BaseController {
     final state = await api.voiceState();
     _voiceEnabled = state['voice_enabled'] != false;
     _maxConcurrent = (state['max_concurrent'] as num?)?.toInt() ?? 4;
-    _active = api.parseActive(state['active']);
+    final sessions = api.parseActive(state['active']);
+    for (final s in sessions) {
+      registry.update(s);
+    }
+    _active = sessions;
     notifyListeners();
     return null;
   });
@@ -192,6 +198,14 @@ class CallsController extends BaseController {
   Future<bool> answer(int deviceId) async {
     final ok = await guard(() => api.answer(deviceId));
     await refresh();
+    final live = forDevice(deviceId);
+    if (live != null && live.state == CallState.active && live.answeredAt == null) {
+      _upsert(live.copyWith(
+        state: CallState.active,
+        answeredAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      ));
+      notifyListeners();
+    }
     return ok != null;
   }
 
@@ -222,6 +236,7 @@ class CallsController extends BaseController {
   }
 
   void _upsert(CallSession session) {
+    registry.update(session);
     final idx = _active.indexWhere((c) => c.callId == session.callId);
     if (idx >= 0) {
       _active[idx] = session;

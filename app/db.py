@@ -14,12 +14,21 @@ _initialized = False
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS totp_enrollments (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    sid TEXT NOT NULL,
+    secret_enc BLOB NOT NULL,
+    expires_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     username        TEXT UNIQUE NOT NULL,
     password_hash   TEXT NOT NULL,
     totp_secret_enc BLOB,
     totp_enabled    INTEGER NOT NULL DEFAULT 0,
+    totp_last_step  INTEGER,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     role            TEXT NOT NULL DEFAULT 'admin',
@@ -316,6 +325,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("is_active", "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"),
         ("must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"),
         ("last_login_at", "ALTER TABLE users ADD COLUMN last_login_at INTEGER"),
+        ("totp_last_step", "ALTER TABLE users ADD COLUMN totp_last_step INTEGER"),
     ):
         if column not in user_cols:
             conn.execute(ddl)

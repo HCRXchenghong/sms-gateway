@@ -46,27 +46,31 @@ class _InCallPageState extends State<InCallPage> {
   }
 
   CallSession? _find(AppScope scope) {
-    for (final c in scope.calls.active) {
-      if (c.callId == widget.callId) return c;
-    }
-    // Fall back to the foreground call if this id already rolled off.
-    return scope.calls.foreground;
+    return scope.calls.registry[widget.callId];
   }
 
   void _tick() {
+    if (!mounted) return;
     final scope = context.read<AppScope>();
     final call = _find(scope);
-    if (call == null) return;
+    if (call == null || call.isEnded) {
+      _ticker?.cancel();
+      return;
+    }
     final started = call.answeredAt;
     if (started == null) return;
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final value = (now - started).clamp(0, 1 << 30);
-    if (value != _elapsed && mounted) setState(() => _elapsed = value);
+    if (value != _elapsed) setState(() => _elapsed = value);
   }
 
   Future<void> _hangup(AppScope scope, CallSession call) async {
-    await scope.calls.hangup(call.deviceId);
-    if (mounted) Navigator.of(context).maybePop();
+    final ok = await scope.calls.hangup(call.deviceId);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('挂断失败: ' + (scope.calls.error ?? '未知错误'))),
+      );
+    }
   }
 
   Future<void> _answer(AppScope scope, CallSession call) async {
@@ -76,7 +80,9 @@ class _InCallPageState extends State<InCallPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('接听失败: ' + (scope.calls.error ?? '未知错误'))),
       );
+      return;
     }
+    setState(() {});
   }
 
   Future<void> _dtmf(AppScope scope, CallSession call, String digit) async {
@@ -116,8 +122,10 @@ class _InCallPageState extends State<InCallPage> {
   Widget build(BuildContext context) {
     final scope = context.watch<AppScope>();
     final call = _find(scope);
-    if (call == null) {
-      // The call ended before this frame; let the router pop us.
+    if (call == null || call.isEnded) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.of(context).maybePop();
+      });
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     final scheme = Theme.of(context).colorScheme;

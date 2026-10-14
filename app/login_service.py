@@ -1,9 +1,8 @@
 """Shared credential checking for the web form and the mobile token endpoint.
 
 Both entry points must apply the same lockout policy and the same second
-factor rules, so the logic lives here once. Accounts created by an admin may
-run without TOTP, while the first admin enrolled through the setup wizard
-always has it.
+factor rules, so the logic lives here once. TOTP is opt-in for all accounts,
+including the first administrator.
 """
 from __future__ import annotations
 
@@ -25,6 +24,7 @@ class LoginResult:
     error: Optional[str] = None
     status_code: int = 401
     must_change_password: bool = False
+    code: str = "login_failed"
 
 
 def client_ip(request: Request) -> str:
@@ -32,6 +32,42 @@ def client_ip(request: Request) -> str:
     if fwd:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+async def _check_totp(user_id: int, secret: str, code: str, *, spend: bool) -> bool:
+    """Verify a TOTP code against the replay guard, optionally spending it.
+
+    The guard records the newest time step that enrollment or a 2FA reset has
+    already consumed, and only ever moves forward. A code from a spent step is
+    refused, which is what stops the code shown during enrollment from being
+    replayed at the login form for the rest of its 30 second window.
+
+    Login checks the guard but does not spend the step. Spending it there would
+    lock out an operator who signs in to the web console and then to the phone
+    app inside the same window, which is a worse problem than the one it solves.
+    """
+    code = (code or "").strip()
+    if not code:
+        return False
+    step = security.verify_totp_step(secret, code)
+    if step is None:
+        return False
+    last = await asyncio.to_thread(repo.get_totp_last_step, user_id)
+    if last is not None and step <= last:
+        return False
+    if spend:
+        await asyncio.to_thread(repo.mark_totp_step_used, user_id, step)
+    return True
+
+
+async def verify_totp_once(user_id: int, secret: str, code: str) -> bool:
+    """Verify and spend a TOTP step. Used by enrollment and by disabling 2FA."""
+    return await _check_totp(user_id, secret, code, spend=True)
+
+
+async def verify_totp_fresh(user_id: int, secret: str, code: str) -> bool:
+    """Verify a TOTP code without spending its step. Used at login."""
+    return await _check_totp(user_id, secret, code, spend=False)
 
 
 async def authenticate(
@@ -64,16 +100,21 @@ async def authenticate(
         return LoginResult(ok=False, error="账号或密码不正确")
 
     if user["totp_enabled"]:
+        if not (code or recovery).strip():
+            return LoginResult(ok=False, error="请输入二次验证码或恢复码", code="totp_required")
+        secret = await asyncio.to_thread(repo.get_totp_secret, user["id"])
+        if not secret:
+            # Enabled without a usable secret is a broken account, not a pass.
+            await asyncio.to_thread(repo.record_login_attempt, username, ip, False)
+            return LoginResult(ok=False, error="两步验证配置异常，请联系管理员", status_code=500, code="totp_broken")
         second_ok = False
-        if (recovery or "").strip():
+        if (code or "").strip():
+            second_ok = await verify_totp_fresh(user["id"], secret, code)
+        if not second_ok and (recovery or "").strip():
             second_ok = await asyncio.to_thread(repo.consume_recovery_code, user["id"], recovery.strip())
-        elif (code or "").strip():
-            secret = await asyncio.to_thread(repo.get_totp_secret, user["id"])
-            if secret:
-                second_ok = security.verify_totp(secret, code.strip())
         if not second_ok:
             await asyncio.to_thread(repo.record_login_attempt, username, ip, False)
-            return LoginResult(ok=False, error="二次验证失败")
+            return LoginResult(ok=False, error="二次验证码不正确", code="totp_invalid")
 
     await asyncio.to_thread(repo.record_login_attempt, username, ip, True)
     await asyncio.to_thread(repo_admin.touch_last_login, user["id"])

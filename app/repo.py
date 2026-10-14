@@ -15,6 +15,21 @@ def has_any_user() -> bool:
         return row["n"] > 0
 
 
+def create_first_admin(username: str, password_hash: str) -> Optional[int]:
+    """First-run creation is atomic; two requests cannot create two admins."""
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        if c.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+            c.rollback()
+            return None
+        now = security.now_epoch()
+        cur = c.execute(
+            "INSERT INTO users (username,password_hash,role,totp_enabled,created_at,updated_at)"
+            " VALUES (?,?,'admin',0,?,?)", (username, password_hash, now, now))
+        c.commit()
+        return int(cur.lastrowid)
+
+
 def get_user_by_username(username: str) -> Optional[sqlite3.Row]:
     with connection() as c:
         return c.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -38,6 +53,41 @@ def create_user_with_pending_totp(username: str, password_hash: str, totp_secret
         return int(cur.lastrowid)
 
 
+def get_enrollment(user_id: int, sid: str, ttl: int) -> Optional[str]:
+    """Valid pending 2FA secret for exactly this browser session."""
+    with connection() as c:
+        row = c.execute(
+            "SELECT secret_enc FROM totp_enrollments WHERE user_id=? AND sid=? AND expires_at>?",
+            (user_id, sid, security.now_epoch()))
+        row = row.fetchone() if row else None
+        if not row: return None
+        return security.decrypt_secret(row["secret_enc"]).decode("utf-8")
+
+
+def put_enrollment(user_id: int, sid: str, secret_plain: str, ttl: int = 600) -> None:
+    enc = security.encrypt_secret(secret_plain.encode("utf-8"))
+    with connection() as c:
+        c.execute(
+            "INSERT INTO totp_enrollments (user_id,sid,secret_enc,expires_at,attempts) VALUES (?,?,?,?,0)"
+            " ON CONFLICT(user_id) DO UPDATE SET sid=excluded.sid,secret_enc=excluded.secret_enc,"
+            "expires_at=excluded.expires_at,attempts=0",
+            (user_id, sid, enc, security.now_epoch() + ttl))
+
+
+def enrollment_attempts(user_id: int, sid: str, ttl: int = 600) -> int:
+    with connection() as c:
+        row = c.execute("SELECT attempts FROM totp_enrollments WHERE user_id=? AND sid=? AND expires_at>?",
+                        (user_id, sid, security.now_epoch())).fetchone()
+        if not row: return 0
+        c.execute("UPDATE totp_enrollments SET attempts=attempts+1 WHERE user_id=?", (user_id,))
+        return int(row["attempts"])
+
+
+def delete_enrollment(user_id: int) -> None:
+    with connection() as c:
+        c.execute("DELETE FROM totp_enrollments WHERE user_id=?", (user_id,))
+
+
 def enable_totp(user_id: int) -> None:
     with connection() as c:
         c.execute(
@@ -58,8 +108,31 @@ def replace_totp(user_id: int, secret_plain: str) -> None:
     enc = security.encrypt_secret(secret_plain.encode("utf-8"))
     with connection() as c:
         c.execute(
-            "UPDATE users SET totp_secret_enc = ?, totp_enabled = 0, updated_at = ? WHERE id = ?",
+            "UPDATE users SET totp_secret_enc = ?, totp_enabled = 0, totp_last_step = NULL, updated_at = ? WHERE id = ?",
             (enc, security.now_epoch(), user_id),
+        )
+
+
+def get_totp_last_step(user_id: int) -> Optional[int]:
+    """Highest TOTP time step this account has already accepted."""
+    with connection() as c:
+        row = c.execute("SELECT totp_last_step FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row or row["totp_last_step"] is None:
+            return None
+        return int(row["totp_last_step"])
+
+
+def mark_totp_step_used(user_id: int, step: int) -> None:
+    """Record a spent TOTP step so the same code cannot be replayed.
+
+    The guard only ever moves forward, so a phone whose clock drifts backwards
+    cannot re-open a step that was already accepted.
+    """
+    with connection() as c:
+        c.execute(
+            "UPDATE users SET totp_last_step = ? WHERE id = ?"
+            " AND (totp_last_step IS NULL OR totp_last_step < ?)",
+            (int(step), user_id, int(step)),
         )
 
 
@@ -89,11 +162,11 @@ def consume_recovery_code(user_id: int, plain: str) -> bool:
         ).fetchone()
         if not row:
             return False
-        c.execute(
-            "UPDATE recovery_codes SET used_at = ? WHERE id = ?",
+        cur = c.execute(
+            "UPDATE recovery_codes SET used_at = ? WHERE id = ? AND used_at IS NULL",
             (security.now_epoch(), row["id"]),
         )
-        return True
+        return cur.rowcount == 1
 
 
 def create_session(user_id: int, ttl_seconds: int, ip: str, ua: str) -> str:

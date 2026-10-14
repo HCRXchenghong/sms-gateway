@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     api_send_rate_limit_per_minute: int = 30
 
     # Recovery codes
+    totp_enroll_ttl_seconds: int = 600
     recovery_codes_count: int = 10
 
     # Message retention
@@ -71,6 +72,13 @@ class Settings(BaseSettings):
     voice_tts_text_encoding: str = "gb2312"
     voice_tts_enabled: bool = True
     voice_clcc_poll_interval_seconds: float = 1.0
+    # A single empty AT+CLCC reply must not end a call. SIMCom modules answer
+    # with no rows for a moment while ATA/ATD is still being processed, which
+    # used to stamp every answered inbound call as hung up in the same second
+    # it was picked up. Polling is only a fallback behind the URCs, so require
+    # a grace window plus a streak of empty replies before trusting it.
+    voice_clcc_absent_grace_seconds: float = 2.0
+    voice_clcc_absent_threshold: int = 3
     voice_ring_timeout_seconds: int = 60
     voice_dial_timeout_answer_seconds: int = 90
     voice_volume_max: int = 5

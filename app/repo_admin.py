@@ -155,10 +155,23 @@ def touch_last_login(user_id: int) -> None:
         c.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (security.now_epoch(), user_id))
 
 
+def set_totp(user_id: int, secret_plain: str) -> None:
+    """Enable with a newly confirmed secret and clear any old codes."""
+    enc = security.encrypt_secret(secret_plain.encode("utf-8"))
+    with connection() as c:
+        # The replay guard is deliberately kept here: confirm() spends a step on
+        # this same secret a moment earlier, and clearing it would re-open that
+        # step for a replayed login. disable_totp and replace_totp reset it when
+        # the secret actually goes away.
+        c.execute("UPDATE users SET totp_secret_enc=?,totp_enabled=1,updated_at=? WHERE id=?",
+                  (enc, security.now_epoch(), user_id))
+        c.execute("DELETE FROM recovery_codes WHERE user_id=?", (user_id,))
+
+
 def disable_totp(user_id: int) -> None:
     with connection() as c:
         c.execute(
-            "UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = NULL, updated_at = ? WHERE id = ?",
             (security.now_epoch(), user_id),
         )
         c.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))

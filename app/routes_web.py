@@ -23,11 +23,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from . import repo, repo_threads, security
+from . import repo, repo_admin, repo_threads, security
 from .auth import CurrentUser, get_current_user, get_optional_user
 from .config import settings
 from .hub import hub
-from .login_service import authenticate, issue_session
+from .login_service import authenticate, issue_session, verify_totp_once
 from .modem import ModemError
 
 router = APIRouter()
@@ -169,8 +169,8 @@ async def setup_submit(
         err = "用户名需 3-32 位，仅包含字母、数字、下划线、点和短横线"
     elif password != password_confirm:
         err = "两次输入的密码不一致"
-    elif not PASSWORD_RE.match(password):
-        err = "密码至少 6 位，并且必须同时包含大写和小写字母"
+    elif security.validate_password(password):
+        err = security.validate_password(password)
     if err:
         return templates.TemplateResponse(
             "setup_step1.html",
@@ -178,61 +178,21 @@ async def setup_submit(
             status_code=400,
         )
 
-    secret = security.new_totp_secret()
     pwhash = await asyncio.to_thread(security.hash_password, password)
-    user_id = await asyncio.to_thread(repo.create_user_with_pending_totp, username, pwhash, secret)
-    uri = security.totp_provisioning_uri(secret, username)
-    qr = _qr_data_url(uri)
-    resp = templates.TemplateResponse(
-        "setup_step2.html",
-        {
-            "request": request,
-            "username": username,
-            "secret": secret,
-            "qr_data_url": qr,
-            "user_id": user_id,
-            "error": None,
-        },
-    )
-    setup_cookie = security.new_session_id()
-    await asyncio.to_thread(
-        repo.create_session,
-        user_id,
-        600,
-        _client_ip(request),
-        request.headers.get("user-agent", ""),
-    )
-    resp.set_cookie(
-        "smsgw_setup",
-        setup_cookie,
-        max_age=600,
-        httponly=True,
-        samesite="lax",
-        secure=request.url.scheme == "https",
-    )
+    user_id = await asyncio.to_thread(repo.create_first_admin, username, pwhash)
+    if user_id is None:
+        return RedirectResponse("/login", status_code=302)
+    user = await asyncio.to_thread(repo.get_user_by_id, user_id)
+    sid, max_age = await issue_session(user, request)
+    resp = RedirectResponse("/app", status_code=302)
+    resp.set_cookie(settings.session_cookie_name, sid, max_age=max_age,
+                    httponly=True, samesite="lax", secure=request.url.scheme == "https")
     return resp
 
 
-@router.post("/setup/confirm", response_class=HTMLResponse)
-async def setup_confirm(
-    request: Request,
-    user_id: int = Form(...),
-    code: str = Form(...),
-):
-    user = await asyncio.to_thread(repo.get_user_by_id, user_id)
-    if not user or user["totp_enabled"]:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_setup")
-    secret = await asyncio.to_thread(repo.get_totp_secret, user_id)
-    if not secret or not security.verify_totp(secret, code):
-        return templates.TemplateResponse(
-            "setup_step2_error.html",
-            {"request": request, "user_id": user_id, "error": "验证码不正确，请重试"},
-            status_code=400,
-        )
-    await asyncio.to_thread(repo.enable_totp, user_id)
-    plain_codes, hashes = security.generate_recovery_codes(settings.recovery_codes_count)
-    await asyncio.to_thread(repo.reset_recovery_codes, user_id, hashes)
-    return templates.TemplateResponse("setup_step3.html", {"request": request, "recovery_codes": plain_codes})
+@router.post("/setup/confirm")
+async def setup_confirm():
+    raise HTTPException(410, "首次配置无需绑定 2FA，请登录后在账号安全中开启")
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -254,7 +214,7 @@ async def login_submit(
     if not result.ok:
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": result.error},
+            {"request": request, "error": result.error, "need_totp": result.code.startswith("totp_"), "username": username},
             status_code=result.status_code,
         )
     user = result.user
@@ -280,6 +240,82 @@ async def logout(request: Request):
     resp = RedirectResponse("/login", status_code=302)
     resp.delete_cookie(settings.session_cookie_name)
     return resp
+
+
+class CurrentPasswordBody(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+
+
+class EnrollConfirmBody(BaseModel):
+    code: str = Field(..., min_length=6, max_length=6)
+
+
+class TotpDisableBody(CurrentPasswordBody):
+    code: str = Field(..., min_length=6, max_length=16)
+
+
+async def _verify_password(user: CurrentUser, current_password: str, request: Request, action: str):
+    row = await asyncio.to_thread(repo.get_user_by_id, user.id)
+    if not row or not await asyncio.to_thread(security.verify_password, current_password, row["password_hash"]):
+        await asyncio.to_thread(repo.audit, "user", user.id, user.username, _client_ip(request), action, None, 401)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "当前密码不正确")
+
+
+@router.get("/app/account/totp")
+async def account_totp_state(user: CurrentUser = Depends(get_current_user)):
+    row = await asyncio.to_thread(repo.get_user_by_id, user.id)
+    return {"totp_enabled": bool(row["totp_enabled"]), "username": user.username}
+
+
+@router.post("/app/account/totp/setup")
+async def account_totp_setup(body: CurrentPasswordBody, request: Request, user: CurrentUser = Depends(get_current_user)):
+    await _verify_password(user, body.current_password, request, "user.totp.setup")
+    row = await asyncio.to_thread(repo.get_user_by_id, user.id)
+    if row["totp_enabled"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, "已开启 2FA，请先关闭再重新绑定")
+    await asyncio.to_thread(repo.delete_enrollment, user.id)
+    secret = security.new_totp_secret()
+    await asyncio.to_thread(repo.put_enrollment, user.id, user.sid, secret)
+    uri = security.totp_provisioning_uri(secret, user.username)
+    await asyncio.to_thread(repo.audit, "user", user.id, user.username, _client_ip(request), "user.totp.setup", None, 200)
+    return {"secret": secret, "qr_data_url": _qr_data_url(uri), "otpauth_url": uri}
+
+
+@router.post("/app/account/totp/confirm")
+async def account_totp_confirm(body: EnrollConfirmBody, request: Request, user: CurrentUser = Depends(get_current_user)):
+    row = await asyncio.to_thread(repo.get_user_by_id, user.id)
+    if row["totp_enabled"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, "2FA 已开启")
+    if await asyncio.to_thread(repo.enrollment_attempts, user.id, user.sid) >= 5:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "尝试次数过多，请重新开始绑定")
+    secret = await asyncio.to_thread(repo.get_enrollment, user.id, user.sid, settings.totp_enroll_ttl_seconds)
+    if not secret:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "绑定已失效，请重新开始")
+    if not await verify_totp_once(user.id, secret, body.code):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "验证码不正确")
+    await asyncio.to_thread(repo_admin.set_totp, user.id, secret)
+    await asyncio.to_thread(repo.delete_enrollment, user.id)
+    plain_codes, hashes = security.generate_recovery_codes(settings.recovery_codes_count)
+    await asyncio.to_thread(repo.reset_recovery_codes, user.id, hashes)
+    await asyncio.to_thread(repo.audit, "user", user.id, user.username, _client_ip(request), "user.totp.enable", None, 200)
+    return {"ok": True, "recovery_codes": plain_codes}
+
+
+@router.post("/app/account/totp/disable")
+async def account_totp_disable(body: TotpDisableBody, request: Request, user: CurrentUser = Depends(get_current_user)):
+    await _verify_password(user, body.current_password, request, "user.totp.disable")
+    row = await asyncio.to_thread(repo.get_user_by_id, user.id)
+    if not row["totp_enabled"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, "2FA 尚未开启")
+    secret = await asyncio.to_thread(repo.get_totp_secret, user.id)
+    second_ok = (secret is not None and await verify_totp_once(user.id, secret, body.code)) or (
+        await asyncio.to_thread(repo.consume_recovery_code, user.id, body.code)
+    )
+    if not second_ok:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "二次验证码或恢复码不正确")
+    await asyncio.to_thread(repo_admin.disable_totp, user.id)
+    await asyncio.to_thread(repo.audit, "user", user.id, user.username, _client_ip(request), "user.totp.disable", None, 200)
+    return {"ok": True}
 
 
 @router.get("/app", response_class=HTMLResponse)

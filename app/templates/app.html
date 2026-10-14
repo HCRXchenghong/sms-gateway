@@ -13,6 +13,7 @@
             <button class="nav-item" data-tab="audio">声卡与提示音</button>
             <button class="nav-item" data-tab="ai">AI 语音</button>
             <button class="nav-item" data-tab="keys">API</button>
+            <button class="nav-item" data-tab="security">账号安全</button>
             {% if user.is_admin %}
             <button class="nav-item" data-tab="accounts">账号管理</button>
             {% endif %}
@@ -312,6 +313,36 @@
             </div>
         </section>
 
+        <section id="tab-security" class="view">
+            <div class="panel">
+                <h2>两步验证（2FA）</h2>
+                <p class="hint">系统默认关闭。开启后网页和 App 登录均需输入动态验证码；恢复码只显示一次，请妥善保存。</p>
+                <div id="totp-status" class="alert info" style="display:none;"></div>
+                <p id="totp-current"></p>
+                <div id="totp-off">
+                    <form id="totp-setup-form" class="key-form key-modal-form">
+                        <label>当前密码<input type="password" name="current_password" required autocomplete="current-password"></label>
+                        <button class="primary" type="submit">开始绑定</button>
+                    </form>
+                </div>
+                <div id="totp-enrolling" style="display:none;">
+                    <img id="totp-qr" alt="2FA 二维码" style="max-width:200px;">
+                    <p class="muted" id="totp-secret"></p>
+                    <form id="totp-confirm-form" class="key-form key-modal-form">
+                        <label>动态验证码<input type="text" name="code" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="one-time-code"></label>
+                        <div class="key-submit"><button class="primary" type="submit">确认开启</button><button type="button" id="totp-cancel">取消</button></div>
+                    </form>
+                </div>
+                <div id="totp-on" style="display:none;">
+                    <form id="totp-disable-form" class="key-form key-modal-form">
+                        <label>当前密码<input type="password" name="current_password" required autocomplete="current-password"></label>
+                        <label>当前验证码或恢复码<input type="text" name="code" required autocomplete="one-time-code"></label>
+                        <div class="key-submit"><button type="submit">关闭 2FA</button></div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
         {% if user.is_admin %}
         <section id="tab-accounts" class="view">
             <div class="panel">
@@ -452,9 +483,26 @@
     </div>
 </div>
 
+<div class="modal-backdrop" id="recovery-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="recovery-modal-title">
+        <div class="modal-head">
+            <div><h2 id="recovery-modal-title">恢复码</h2>
+            <p class="muted">只显示这一次，请立即抄写或下载保存。</p></div>
+            <button type="button" class="icon-button" id="close-recovery-modal" aria-label="关闭">×</button>
+        </div>
+        <ul id="recovery-list"></ul>
+        <div class="key-submit">
+            <button type="button" id="copy-recovery" class="primary">复制</button>
+            <button type="button" id="download-recovery">下载文本</button>
+            <button type="button" id="done-recovery">我已保存</button>
+        </div>
+    </div>
+</div>
+
 {% endblock %}
 {% block scripts %}
 <script src="/static/app.js"></script>
 <script src="/static/app_console.js"></script>
 <script src="/static/app_messages.js"></script>
+<script src="/static/app_security.js"></script>
 {% endblock %}

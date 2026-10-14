@@ -115,6 +115,7 @@ class ApiClient {
 
   String _errorMessage(dynamic decoded) {
     if (decoded is Map) {
+      if (decoded['detail'] is Map) return _errorMessage(decoded['detail']);
       final err = decoded['error'];
       if (err is Map)
         return (err['message'] ?? err['code'] ?? '请求失败').toString();
@@ -128,6 +129,7 @@ class ApiClient {
 
   String? _errorCode(dynamic decoded) {
     if (decoded is Map) {
+      if (decoded['detail'] is Map) return _errorCode(decoded['detail']);
       final err = decoded['error'];
       if (err is Map) return err['code']?.toString();
       return decoded['code']?.toString();
