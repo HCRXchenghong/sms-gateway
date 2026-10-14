@@ -32,11 +32,29 @@ class AppScope extends ChangeNotifier {
     realtime.onEvent = _onRealtimeEvent;
     realtime.onReconnect = _reconnect;
     this.api.onUnauthorized = _onUnauthorized;
+
+    // Widgets watch AppScope while the data lives in the controllers below.
+    // Forward their notifications so the shell repaints when a device list,
+    // call state or conversation list arrives after the first frame.
+    _controllers.addAll(<ChangeNotifier>[
+      devices,
+      calls,
+      messages,
+      contacts,
+      audio,
+      ai,
+      settings,
+      users,
+    ]);
+    for (final controller in _controllers) {
+      controller.addListener(_onControllerChanged);
+    }
   }
 
   final ApiClient api;
   final SessionStore store;
   final RealtimeClient realtime = RealtimeClient();
+  final List<ChangeNotifier> _controllers = [];
 
   late final DevicesController devices;
   late final CallsController calls;
@@ -59,6 +77,24 @@ class AppScope extends ChangeNotifier {
   String? get loginError => _loginError;
   bool get restoring => _restoring;
   bool get isLoggedIn => _phase == AuthPhase.loggedIn;
+
+  bool _disposed = false;
+  bool _forwardScheduled = false;
+
+  void _onControllerChanged() {
+    if (_disposed) return;
+    // Controllers flip their busy flag synchronously, including from a page
+    // initState during the build phase. Coalesce the forwarding into a
+    // microtask so an ancestor that already built this frame is never marked
+    // dirty mid-build, and a burst of updates costs one rebuild.
+    if (_forwardScheduled) return;
+    _forwardScheduled = true;
+    scheduleMicrotask(() {
+      _forwardScheduled = false;
+      if (_disposed) return;
+      notifyListeners();
+    });
+  }
 
   /// Feed a realtime event in from tests without a live socket.
   @visibleForTesting
@@ -214,6 +250,10 @@ class AppScope extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    for (final controller in _controllers) {
+      controller.removeListener(_onControllerChanged);
+    }
     realtime.dispose();
     devices.dispose();
     calls.dispose();
