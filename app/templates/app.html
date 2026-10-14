@@ -183,6 +183,38 @@
                         <button type="button" class="button" id="mock-set-scenario">设置下次拨号结果</button>
                     </div>
                 </div>
+
+                <div class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>通话助手</h2>
+                            <span class="hint">实时翻译、AI 接管与通话纪要，字幕由网关实时推送。</span>
+                        </div>
+                        <button type="button" class="button" id="flow-refresh">刷新</button>
+                    </div>
+                    <div class="form-row">
+                        <select id="flow-call"></select>
+                        <select id="flow-mode">
+                            <option value="off">翻译：关</option>
+                            <option value="subtitle">翻译：字幕</option>
+                            <option value="voice">翻译：字幕+语音</option>
+                        </select>
+                        <button type="button" class="button" id="flow-apply-mode">应用翻译</button>
+                    </div>
+                    <div id="flow-note" class="hint"></div>
+                    <div id="flow-subs" class="call-tts-log" style="max-height:220px;overflow:auto;"></div>
+                    <label>说给对方
+                        <input type="text" id="flow-say" maxlength="500" placeholder="输入一句话，翻译后说给对方">
+                    </label>
+                    <div class="form-row">
+                        <button type="button" class="button" id="flow-say-send">说给对方</button>
+                        <button type="button" class="button" id="flow-agent">AI 接管</button>
+                        <button type="button" class="button" id="flow-handover">接管回来</button>
+                        <button type="button" class="button" id="flow-summary">生成纪要</button>
+                    </div>
+                    <div id="flow-status" class="hint"></div>
+                    <div id="flow-summary-box" class="alert info" style="display:none;"></div>
+                </div>
             </div>
         </section>
 
@@ -309,6 +341,62 @@
                         <button type="button" class="button" id="ai-call-speak">AI 生成并播报到通话</button>
                     </div>
                     <div id="ai-health" class="alert info" style="display:none;"></div>
+                </div>
+            </div>
+
+            <div class="two-col">
+                <div class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>通话策略</h2>
+                            <span class="hint">来电处理、实时翻译、录音与纪要的默认值，保存后热加载。</span>
+                        </div>
+                        <button type="button" class="button" id="refresh-callflow">刷新</button>
+                    </div>
+                    <form id="callflow-settings-form" class="clean-form"></form>
+                    <div class="form-row">
+                        <span id="callflow-status" class="hint"></span>
+                        <button type="button" class="primary" id="save-callflow-settings">保存策略</button>
+                    </div>
+                    <p class="hint">录音提示只告知“录音已开始”，不会使用其它措辞。<code>待接入</code> 的 AI 目的留空时，使用来电策略里的默认目的。</p>
+                </div>
+
+                <div class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>AI 代打任务</h2>
+                            <span class="hint">网关自己拨号或等对方打进来，谈完交回纪要。</span>
+                        </div>
+                        <button type="button" class="button" id="refresh-tasks">刷新</button>
+                    </div>
+                    <form id="task-create-form" class="clean-form">
+                        <label>这通电话要谈成什么
+                            <textarea id="task-purpose" rows="2" maxlength="1000" required></textarea>
+                        </label>
+                        <div class="form-row">
+                            <select id="task-direction">
+                                <option value="outbound">外呼</option>
+                                <option value="inbound">待接入</option>
+                            </select>
+                            <input type="text" id="task-number" placeholder="对方号码（外呼必填）" maxlength="24">
+                            <input type="text" id="task-peer-language" placeholder="对方语言（可选）" maxlength="16">
+                        </div>
+                        <label>背景资料（可选）
+                            <textarea id="task-context" rows="2" maxlength="4000"></textarea>
+                        </label>
+                        <div class="form-row">
+                            <label class="mini-label">通话上限（分钟）
+                                <input type="number" id="task-minutes" min="1" max="60" value="5">
+                            </label>
+                            <button type="submit" class="primary">创建任务</button>
+                        </div>
+                    </form>
+                    <div id="task-status" class="hint"></div>
+                    <table class="msglist" id="tasks-table">
+                        <thead><tr><th>#</th><th>目的</th><th>号码</th><th>状态</th><th>结果</th><th>操作</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    <div id="task-detail" class="alert info" style="display:none;"></div>
                 </div>
             </div>
         </section>

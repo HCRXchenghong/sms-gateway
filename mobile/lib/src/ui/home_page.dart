@@ -1,5 +1,5 @@
 /// Logged-in shell with a bottom navigation bar mirroring a stock phone app:
-/// dialer, messages, contacts, AI assistant and account.
+/// dialer, messages, contacts, the AI call queue and account.
 library;
 
 import 'dart:async';
@@ -7,9 +7,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../config/app_theme.dart';
 import '../data/realtime_client.dart';
 import '../state/app_scope.dart';
-import 'ai_assistant_page.dart';
+import 'ai_calls_page.dart';
 import 'contacts_page.dart';
 import 'conversations_page.dart';
 import 'dialer_page.dart';
@@ -28,7 +29,7 @@ class _HomePageState extends State<HomePage> {
   late int _index = widget.initialTab;
   Timer? _poll;
 
-  static const _titles = ['拨号', '短信', '通讯录', 'AI 助手', '我的'];
+  static const _titles = ['拨号', '短信', '通讯录', 'AI 代打', '我的'];
 
   @override
   void initState() {
@@ -57,7 +58,7 @@ class _HomePageState extends State<HomePage> {
       const DialerPage(),
       const ConversationsPage(),
       const ContactsPage(),
-      const AiAssistantPage(),
+      const AiCallsPage(),
       const SettingsPage(),
     ];
     return Scaffold(
@@ -78,47 +79,11 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       body: IndexedStack(index: _index, children: pages),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: [
-          NavigationDestination(
-            icon: Badge(
-              isLabelVisible: scope.calls.hasActive,
-              child: const Icon(Icons.dialpad_outlined),
-            ),
-            selectedIcon: const Icon(Icons.dialpad),
-            label: '拨号',
-          ),
-          NavigationDestination(
-            icon: Badge(
-              isLabelVisible: scope.messages.unreadTotal > 0,
-              label: Text(
-                scope.messages.unreadTotal > 99
-                    ? '99+'
-                    : scope.messages.unreadTotal.toString(),
-              ),
-              child: const Icon(Icons.chat_bubble_outline),
-            ),
-            selectedIcon: const Icon(Icons.chat_bubble),
-            label: '短信',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.contacts_outlined),
-            selectedIcon: Icon(Icons.contacts),
-            label: '通讯录',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.smart_toy_outlined),
-            selectedIcon: Icon(Icons.smart_toy),
-            label: 'AI 助手',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person),
-            label: '我的',
-          ),
-        ],
+      bottomNavigationBar: _BottomBar(
+        index: _index,
+        activeCall: scope.calls.hasActive,
+        unread: scope.messages.unreadTotal,
+        onChanged: (i) => setState(() => _index = i),
       ),
     );
   }
@@ -216,6 +181,124 @@ class _DevicePicker extends StatelessWidget {
             const Icon(Icons.arrow_drop_down, size: 18),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// One entry in the stock-style bottom bar.
+class _BarItem {
+  const _BarItem(this.label, this.icon, {this.dot = false, this.count = 0});
+
+  final String label;
+  final IconData icon;
+  final bool dot;
+  final int count;
+}
+
+/// Stock phone-app bottom bar: thin outline icons over small labels, no
+/// indicator pill, a hairline separating it from the content above.
+class _BottomBar extends StatelessWidget {
+  const _BottomBar({
+    required this.index,
+    required this.activeCall,
+    required this.unread,
+    required this.onChanged,
+  });
+
+  final int index;
+  final bool activeCall;
+  final int unread;
+  final ValueChanged<int> onChanged;
+
+  static const Color _idle = Color(0xFF8A8F98);
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final items = <_BarItem>[
+      _BarItem('拨号', Icons.dialpad_outlined, dot: activeCall),
+      _BarItem('短信', Icons.chat_bubble_outline, count: unread),
+      const _BarItem('通讯录', Icons.contacts_outlined),
+      const _BarItem('AI 代打', Icons.support_agent_outlined),
+      const _BarItem('我的', Icons.person_outline),
+    ];
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        border: Border(
+          top: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.55)),
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 58,
+          child: Row(
+            children: [
+              for (var i = 0; i < items.length; i++)
+                Expanded(
+                  child: _BottomBarItem(
+                    item: items[i],
+                    selected: i == index,
+                    onTap: () => onChanged(i),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BottomBarItem extends StatelessWidget {
+  const _BottomBarItem({
+    required this.item,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final _BarItem item;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = selected ? scheme.onSurface : _BottomBar._idle;
+    Widget icon = Icon(item.icon, size: 24, color: color);
+    if (item.dot) {
+      icon = Badge(
+        isLabelVisible: true,
+        backgroundColor: AppTheme.call,
+        child: icon,
+      );
+    } else if (item.count > 0) {
+      icon = Badge(
+        label: Text(item.count > 99 ? '99+' : item.count.toString()),
+        backgroundColor: AppTheme.call,
+        textColor: Colors.white,
+        child: icon,
+      );
+    }
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          icon,
+          const SizedBox(height: 3),
+          Text(
+            item.label,
+            style: TextStyle(
+              fontSize: 11,
+              height: 1.1,
+              color: color,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
+        ],
       ),
     );
   }

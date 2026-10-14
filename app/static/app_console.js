@@ -549,6 +549,9 @@
                     if (text) note('#dial-status', text);
                 }
             }
+            if (name === 'call.transcript' || name === 'call.translation') appendFlowLine(name, data);
+            if (name.indexOf('call.flow') === 0 || name === 'call.summary') refreshFlowPanel();
+            if (name.indexOf('ai_call.') === 0) refreshTasks();
             if (name === 'sms.received' || name === 'sms.sent') {
                 // app.js already refreshes the message tables; nothing to do.
             }
@@ -1056,6 +1059,413 @@
         }
     }
 
+    // --------------------------------- call flow: translation, agent, minutes
+
+    var flowState = { callId: null, flows: {} };
+    var TERMINAL_TASK = ['finished', 'failed', 'cancelled', 'no_answer', 'rejected', 'busy'];
+    var TASK_LABEL = {
+        queued: '排队中', dialing: '拨号中', in_call: '通话中', finished: '已完成',
+        failed: '失败', cancelled: '已取消', no_answer: '无人接听', rejected: '已拒接', busy: '占线'
+    };
+
+    async function refreshFlowPanel() {
+        var sel = $('#flow-call');
+        if (!sel) return;
+        var data;
+        try {
+            data = await json('/app/voice/flow');
+        } catch (e) {
+            return;
+        }
+        flowState.flows = {};
+        var calls = data.calls || [];
+        calls.forEach(function(c) { flowState.flows[c.call_id] = c; });
+        var live = calls.filter(function(c) { return c.state !== 'ended'; });
+        var keep = sel.value;
+        sel.innerHTML = '';
+        if (!live.length) {
+            sel.appendChild(el('option', { value: '' }, '当前没有通话'));
+            flowState.callId = null;
+        } else {
+            live.forEach(function(c) {
+                sel.appendChild(el('option', { value: c.call_id },
+                    (c.remote || c.call_id) + ' · ' + (STATE_LABEL[c.state] || c.state)));
+            });
+            var hasKeep = live.some(function(c) { return c.call_id === keep; });
+            sel.value = hasKeep ? keep : live[0].call_id;
+            flowState.callId = sel.value;
+        }
+        syncFlowControls();
+    }
+
+    function currentFlow() {
+        if (!flowState.callId) return null;
+        return flowState.flows[flowState.callId] || null;
+    }
+
+    function agentLive(flow) {
+        return !!(flow && flow.agent && flow.agent.pending !== true && flow.agent.finished !== true);
+    }
+
+    function syncFlowControls() {
+        var flow = currentFlow();
+        var live = !!flow;
+        ['#flow-apply-mode', '#flow-say-send', '#flow-summary', '#flow-agent'].forEach(function(sel) {
+            var b = $(sel);
+            if (b) b.disabled = !live;
+        });
+        var hand = $('#flow-handover');
+        if (hand) hand.disabled = !(agentLive(flow) && !flow.handover);
+        var modeSel = $('#flow-mode');
+        if (modeSel) modeSel.value = (flow && flow.translation && flow.translation.mode) || 'off';
+        var noteBox = $('#flow-note');
+        if (noteBox) {
+            var parts = [];
+            if (flow && flow.translation) {
+                parts.push('我：' + (flow.translation.my_language || '自动') + '　对方：' + (flow.translation.peer_language || '自动'));
+            }
+            if (flow && flow.translation_note) parts.push('说明：' + flow.translation_note);
+            if (flow && flow.agent && flow.agent.pending) parts.push('AI 接管请求已提交');
+            else if (agentLive(flow)) parts.push('AI 正在替你说这通电话');
+            if (flow && flow.handover) parts.push('已接管回来');
+            if (flow && flow.capture_error) parts.push('采集异常：' + flow.capture_error);
+            noteBox.textContent = parts.join('　|　');
+        }
+    }
+
+    function appendFlowLine(name, data) {
+        var box = $('#flow-subs');
+        if (!box || !data || data.call_id !== flowState.callId) return;
+        var line;
+        if (name === 'call.translation') {
+            line = (data.speaker === 'me' ? '我' : '对方') + '（' + (data.source_language || '') +
+                '→' + (data.target_language || '') + '）：' + (data.source_text || '') +
+                ' ⇒ ' + (data.target_text || '');
+        } else {
+            var entry = data.entry || {};
+            var role = entry.role === 'peer' ? '对方' : entry.role === 'me' ? '我' : entry.role === 'agent' ? 'AI' : '系统';
+            line = role + '：' + (entry.content || '');
+            if (entry.original && entry.original !== entry.content) line += '（原话：' + entry.original + '）';
+        }
+        box.appendChild(el('div', null, line));
+        while (box.children.length > 120) box.removeChild(box.firstChild);
+        box.scrollTop = box.scrollHeight;
+    }
+
+    async function flowPost(path, body, okText) {
+        if (!flowState.callId) { note('#flow-status', '先选择一通通话', true); return; }
+        try {
+            await post('/app/voice/calls/' + flowState.callId + path, body);
+            note('#flow-status', okText);
+        } catch (e) {
+            note('#flow-status', '操作失败：' + e.message, true);
+            return;
+        }
+        await refreshFlowPanel();
+    }
+
+    async function flowSummary() {
+        if (!flowState.callId) { note('#flow-status', '先选择一通通话', true); return; }
+        var box = $('#flow-summary-box');
+        try {
+            var data = await json('/app/voice/calls/' + flowState.callId + '/summary');
+            var m = data.summary || {};
+            var lines = [m.summary || '（空纪要）'];
+            if (m.purpose_achieved === true) lines.push('目的已达成');
+            if (m.purpose_achieved === false) lines.push('目的未达成');
+            if (m.purpose_evidence) lines.push('依据：' + m.purpose_evidence);
+            ['key_facts', 'agreements', 'unconfirmed'].forEach(function(key) {
+                (m[key] || []).forEach(function(item) { lines.push('· ' + item); });
+            });
+            (m.todos || []).forEach(function(t) {
+                lines.push('· 待办：' + (t.task || '') + (t.owner ? '（' + t.owner + (t.due ? ' ' + t.due : '') + '）' : ''));
+            });
+            box.style.display = '';
+            box.className = 'alert info';
+            box.style.whiteSpace = 'pre-wrap';
+            box.textContent = lines.join('\n');
+            note('#flow-status', '纪要已生成');
+        } catch (e) {
+            note('#flow-status', '生成纪要失败：' + e.message, true);
+        }
+    }
+
+    function initFlowPanel() {
+        var sel = $('#flow-call');
+        if (!sel) return;
+        sel.addEventListener('change', function() {
+            flowState.callId = sel.value || null;
+            var box = $('#flow-subs');
+            if (box) box.innerHTML = '';
+            syncFlowControls();
+        });
+        $('#flow-refresh').addEventListener('click', refreshFlowPanel);
+        $('#flow-apply-mode').addEventListener('click', function() {
+            flowPost('/translate', { mode: $('#flow-mode').value }, '翻译模式已应用');
+        });
+        $('#flow-say-send').addEventListener('click', function() {
+            var input = $('#flow-say');
+            var text = (input.value || '').trim();
+            if (!text) return;
+            flowPost('/say', { text: text }, '已说给对方');
+            input.value = '';
+        });
+        $('#flow-agent').addEventListener('click', function() {
+            var purpose = prompt('要让 AI 在这通电话里谈成什么？', '');
+            if (!purpose) return;
+            flowPost('/agent', { purpose: purpose }, 'AI 接管请求已提交');
+        });
+        $('#flow-handover').addEventListener('click', function() {
+            flowPost('/agent/handover', null, '已接管回来');
+        });
+        $('#flow-summary').addEventListener('click', flowSummary);
+    }
+
+    // --------------------------------------------------------- AI call tasks
+
+    async function refreshTasks() {
+        var tbody = $('#tasks-table tbody');
+        if (!tbody) return;
+        try {
+            var data = await json('/app/ai-call/tasks?limit=50');
+            tbody.innerHTML = '';
+            (data.items || []).forEach(function(t) {
+                var tr = el('tr');
+                tr.appendChild(el('td', null, String(t.id)));
+                tr.appendChild(el('td', null, t.purpose || ''));
+                tr.appendChild(el('td', null, (t.direction === 'inbound' ? '待接入' : '外呼') + (t.number ? ' ' + t.number : '')));
+                tr.appendChild(el('td', null, TASK_LABEL[t.status] || t.status));
+                tr.appendChild(el('td', null, t.achieved === true ? '目的已达成' : t.achieved === false ? '目的未达成' : (t.result || t.error || '-')));
+                var actions = el('td');
+                actions.appendChild(callButton('查看', '', function() { viewTask(t.id); }));
+                if (TERMINAL_TASK.indexOf(t.status) < 0) {
+                    actions.appendChild(callButton('取消', 'danger', function() { cancelTask(t.id); }));
+                }
+                tr.appendChild(actions);
+                tbody.appendChild(tr);
+            });
+            if (!tbody.children.length) {
+                tbody.appendChild(el('tr', null)).appendChild(el('td', { colspan: '6', class: 'empty-state' }, '还没有任务'));
+            }
+        } catch (e) {
+            note('#task-status', '读取任务失败：' + e.message, true);
+        }
+    }
+
+    async function cancelTask(id) {
+        try {
+            await post('/app/ai-call/tasks/' + id + '/cancel', null);
+            note('#task-status', '任务 ' + id + ' 已取消');
+        } catch (e) {
+            note('#task-status', '取消失败：' + e.message, true);
+        }
+        await refreshTasks();
+    }
+
+    async function viewTask(id) {
+        var box = $('#task-detail');
+        if (!box) return;
+        try {
+            var data = await json('/app/ai-call/tasks/' + id);
+            var t = data.task || {};
+            var lines = [
+                '#' + t.id + '　' + (TASK_LABEL[t.status] || t.status) + '　' +
+                    (t.direction === 'inbound' ? '待接入' : '外呼 ' + (t.number || '')),
+                '目的：' + (t.purpose || ''),
+                t.context ? '背景：' + t.context : null,
+                t.result ? '结论：' + t.result : null,
+                t.error ? '错误：' + t.error : null,
+                t.achieved === true ? '目的已达成' : t.achieved === false ? '目的未达成' : null
+            ].filter(function(x) { return x; });
+            var m = t.summary || null;
+            if (m) {
+                if (m.summary) lines.push('纪要：' + m.summary);
+                if (m.purpose_evidence) lines.push('依据：' + m.purpose_evidence);
+                (m.key_facts || []).forEach(function(x) { lines.push('· 事实：' + x); });
+                (m.agreements || []).forEach(function(x) { lines.push('· 约定：' + x); });
+                (m.todos || []).forEach(function(x) {
+                    lines.push('· 待办：' + (x.task || '') + (x.owner ? '（' + x.owner + (x.due ? ' ' + x.due : '') + '）' : ''));
+                });
+                (m.unconfirmed || []).forEach(function(x) { lines.push('· 未确认：' + x); });
+            }
+            var flow = data.flow || null;
+            if (flow && (flow.transcript || []).length) {
+                lines.push('通话内容：');
+                flow.transcript.slice(-40).forEach(function(entry) {
+                    var role = entry.role === 'peer' ? '对方' : entry.role === 'me' ? '我' : entry.role === 'agent' ? 'AI' : '系统';
+                    lines.push('　' + role + '：' + (entry.content || ''));
+                });
+            }
+            box.style.display = '';
+            box.className = 'alert info';
+            box.style.whiteSpace = 'pre-wrap';
+            box.textContent = lines.join('\n');
+        } catch (e) {
+            note('#task-status', '读取任务详情失败：' + e.message, true);
+        }
+    }
+
+    function initTasksPanel() {
+        var form = $('#task-create-form');
+        if (!form) return;
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            var purpose = ($('#task-purpose').value || '').trim();
+            if (purpose.length < 2) { note('#task-status', '写清楚这通电话要谈成什么', true); return; }
+            var direction = $('#task-direction').value;
+            var number = ($('#task-number').value || '').trim();
+            if (direction === 'outbound' && !number) { note('#task-status', '外呼任务需要填写号码', true); return; }
+            var minutes = parseInt($('#task-minutes').value || '5', 10);
+            var body = {
+                purpose: purpose,
+                direction: direction,
+                context: ($('#task-context').value || '').trim() || null,
+                peer_language: ($('#task-peer-language').value || '').trim() || null,
+                max_seconds: minutes * 60
+            };
+            if (number) body.number = number;
+            note('#task-status', '创建中…');
+            try {
+                var r = await api('/app/ai-call/tasks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (!r.ok) throw new Error(await errorText(r));
+                var data = await r.json();
+                note('#task-status', data.idempotent
+                    ? '这个请求已提交过，返回原任务 #' + data.task.id
+                    : '已创建任务 #' + data.task.id);
+            } catch (err) {
+                note('#task-status', '创建失败：' + err.message, true);
+            }
+            await refreshTasks();
+        });
+        $('#refresh-tasks').addEventListener('click', refreshTasks);
+    }
+
+    // ------------------------------------------------------- call policy form
+
+    var CF_KEYS = [
+        'inbound.mode', 'inbound.auto_answer_delay_seconds', 'inbound.ai_max_seconds',
+        'inbound.ai_purpose', 'inbound.ai_opener',
+        'translate.mode', 'translate.cadence', 'translate.my_language', 'translate.peer_language',
+        'translate.stream_degrade_to_sentence',
+        'recording.policy', 'recording.announce', 'recording.default_enabled',
+        'transcript.save', 'summary.save', 'summary.auto_generate', 'summary.template'
+    ];
+    var CF_LABELS = {
+        'inbound.mode': '来电处理',
+        'inbound.auto_answer_delay_seconds': '自动接听延迟（秒）',
+        'inbound.ai_max_seconds': '来电 AI 通话上限（秒）',
+        'inbound.ai_purpose': '来电 AI 的默认目的',
+        'inbound.ai_opener': '来电 AI 的开场白',
+        'translate.mode': '实时翻译默认模式',
+        'translate.cadence': '翻译节奏',
+        'translate.my_language': '我方语言',
+        'translate.peer_language': '对方语言',
+        'translate.stream_degrade_to_sentence': '流式不稳时退回整句',
+        'recording.policy': '录音策略',
+        'recording.announce': '录音开始时告知对方',
+        'recording.default_enabled': '默认开启录音',
+        'transcript.save': '保存通话文字记录',
+        'summary.save': '保存通话纪要',
+        'summary.auto_generate': '挂断后自动生成纪要',
+        'summary.template': '纪要模板要求'
+    };
+    var CF_SELECTS = {
+        'inbound.mode': [['manual', '人工接听'], ['auto_answer', '自动接听'], ['auto_answer_ai', '自动接听并让 AI 谈']],
+        'translate.mode': [['off', '关'], ['subtitle', '字幕'], ['voice', '字幕+语音']],
+        'translate.cadence': [['sentence', '整句'], ['stream', '流式']],
+        'recording.policy': [['forced', '强制录音'], ['optional', '允许关闭'], ['disabled', '不录音']]
+    };
+    var CF_AREA = ['inbound.ai_purpose', 'inbound.ai_opener', 'summary.template'];
+    var cfForm = { values: {}, controllers: {} };
+
+    async function refreshCallflowSettings() {
+        var form = $('#callflow-settings-form');
+        if (!form) return;
+        var data;
+        try {
+            data = await json('/app/admin/settings');
+        } catch (e) {
+            form.innerHTML = '';
+            form.appendChild(el('p', { class: 'hint' }, '需要管理员权限才能编辑通话策略：' + e.message));
+            return;
+        }
+        cfForm.values = data.settings || {};
+        cfForm.controllers = {};
+        form.innerHTML = '';
+        var editable = data.editable || [];
+        CF_KEYS.forEach(function(key) {
+            if (editable.indexOf(key) < 0) return;
+            var value = cfForm.values[key];
+            var wrap = el('label', null, CF_LABELS[key] || key);
+            if (typeof value === 'boolean') {
+                var cb = el('input', { type: 'checkbox' });
+                cb.checked = !!value;
+                cb.addEventListener('change', function() { cfForm.controllers[key] = cb.checked; });
+                wrap.appendChild(cb);
+                wrap.className = 'check';
+            } else if (CF_SELECTS[key]) {
+                var sel = el('select');
+                CF_SELECTS[key].forEach(function(pair) {
+                    sel.appendChild(el('option', { value: pair[0] }, pair[1]));
+                });
+                sel.value = String(value === null || value === undefined ? '' : value);
+                sel.addEventListener('change', function() { cfForm.controllers[key] = sel.value; });
+                wrap.appendChild(sel);
+            } else if (CF_AREA.indexOf(key) >= 0) {
+                var area = el('textarea', { rows: '3' });
+                area.value = value === null || value === undefined ? '' : String(value);
+                area.addEventListener('input', function() { cfForm.controllers[key] = area.value; });
+                wrap.appendChild(area);
+            } else {
+                var input = el('input', { type: 'text' });
+                input.value = value === null || value === undefined ? '' : String(value);
+                input.addEventListener('input', function() { cfForm.controllers[key] = input.value; });
+                wrap.appendChild(input);
+            }
+            form.appendChild(wrap);
+        });
+        if (!form.children.length) {
+            form.appendChild(el('p', { class: 'hint' }, '没有可编辑的通话策略项。'));
+        }
+    }
+
+    function initCallflowTab() {
+        initFlowPanel();
+        initTasksPanel();
+        var refresh = $('#refresh-callflow');
+        if (refresh) refresh.addEventListener('click', refreshCallflowSettings);
+        var save = $('#save-callflow-settings');
+        if (save) save.addEventListener('click', async function() {
+            var patch = {};
+            Object.keys(cfForm.controllers).forEach(function(key) {
+                var value = cfForm.controllers[key];
+                if (value === null || value === undefined) return;
+                if (typeof value === 'string' &&
+                        value === String(cfForm.values[key] === undefined ? '' : cfForm.values[key])) return;
+                patch[key] = value;
+            });
+            if (!Object.keys(patch).length) { note('#callflow-status', '没有需要保存的改动'); return; }
+            note('#callflow-status', '保存中…');
+            try {
+                var r = await api('/app/admin/settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ settings: patch })
+                });
+                if (!r.ok) throw new Error(await errorText(r));
+                var data = await r.json();
+                note('#callflow-status', '已保存并热加载：' + Object.keys(data.applied || {}).join('、'));
+                await refreshCallflowSettings();
+            } catch (err) {
+                note('#callflow-status', '保存失败：' + err.message, true);
+            }
+        });
+    }
+
     // ------------------------------------------------------------------- init
 
     async function init() {
@@ -1064,6 +1474,7 @@
         initCallsTab();
         initAudioTab();
         initAiTab();
+        initCallflowTab();
         initSecurityTab();
     initAccountsTab();
 
@@ -1073,9 +1484,14 @@
         refreshCallStats();
         refreshCallHistory();
         refreshAi();
+        refreshCallflowSettings();
+        refreshTasks();
+        refreshFlowPanel();
 
         connectConsoleWs();
         setInterval(refreshCalls, 5000);
+        setInterval(refreshFlowPanel, 5000);
+        setInterval(refreshTasks, 10000);
         setInterval(refreshDevices, 15000);
     }
 

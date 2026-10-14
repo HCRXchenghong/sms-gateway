@@ -27,6 +27,7 @@ class AppScope extends ChangeNotifier {
     contacts = ContactsController(this.api);
     audio = AudioController(this.api);
     ai = AiController(this.api);
+    aiCalls = AiCallsController(this.api);
     settings = SettingsController(this.api);
     users = UsersController(this.api);
 
@@ -44,6 +45,7 @@ class AppScope extends ChangeNotifier {
       contacts,
       audio,
       ai,
+      aiCalls,
       settings,
       users,
     ]);
@@ -63,6 +65,7 @@ class AppScope extends ChangeNotifier {
   late final ContactsController contacts;
   late final AudioController audio;
   late final AiController ai;
+  late final AiCallsController aiCalls;
   late final SettingsController settings;
   late final UsersController users;
 
@@ -105,6 +108,9 @@ class AppScope extends ChangeNotifier {
   void _onRealtimeEvent(RealtimeEvent event) {
     if (event.isCall) calls.applyEvent(event);
     if (event.isSms) messages.applyEvent(event);
+    if (event.isCall || event.event.startsWith('ai_call.')) {
+      aiCalls.applyEvent(event);
+    }
     if (event.event.startsWith('device.')) unawaited(devices.refresh());
   }
 
@@ -163,6 +169,8 @@ class AppScope extends ChangeNotifier {
       contacts.refresh(),
       audio.refresh(),
       ai.refresh(),
+      aiCalls.refreshState(),
+      aiCalls.refreshTasks(),
       if (_caps.admin) settings.refresh(),
     ]);
   }
@@ -278,6 +286,7 @@ class AppScope extends ChangeNotifier {
     contacts.dispose();
     audio.dispose();
     ai.dispose();
+    aiCalls.dispose();
     settings.dispose();
     users.dispose();
     api.close();

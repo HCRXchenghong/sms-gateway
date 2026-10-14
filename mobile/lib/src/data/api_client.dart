@@ -562,6 +562,120 @@ class ApiClient {
     return data;
   }
 
+  // ---------------------------------------------------------- call flow
+  //
+  // Live translation, the call agent and the minutes all live behind these.
+  // The shapes mirror what the console sees, so the app and the web UI agree.
+
+  Future<Map<String, dynamic>> flowState() async =>
+      Map<String, dynamic>.from(await get('/app/voice/flow') as Map);
+
+  Future<Map<String, dynamic>> callFlow(String callId) async =>
+      Map<String, dynamic>.from(
+          await get('/app/voice/calls/$callId/flow') as Map);
+
+  Future<List<Map<String, dynamic>>> callTranscript(
+    String callId, {
+    int limit = 200,
+  }) async {
+    final raw = await get('/app/voice/calls/$callId/transcript',
+        query: {'limit': limit});
+    final items = (raw['items'] as List?) ?? const <dynamic>[];
+    return items
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList(growable: false);
+  }
+
+  Future<Map<String, dynamic>> setTranslation(
+    String callId, {
+    String? mode,
+    String? cadence,
+    String? myLanguage,
+    String? peerLanguage,
+  }) =>
+      post('/app/voice/calls/$callId/translate', body: {
+        if (mode != null) 'mode': mode,
+        if (cadence != null) 'cadence': cadence,
+        if (myLanguage != null) 'my_language': myLanguage,
+        if (peerLanguage != null) 'peer_language': peerLanguage,
+      }).then((raw) => Map<String, dynamic>.from(raw as Map));
+
+  Future<dynamic> stopTranslation(String callId) =>
+      delete('/app/voice/calls/$callId/translate');
+
+  /// Say something to the far end. Translated first when translation is on.
+  Future<Map<String, dynamic>> sayToCall(String callId, String text) =>
+      post('/app/voice/calls/$callId/say', body: {'text': text})
+          .then((raw) => Map<String, dynamic>.from(raw as Map));
+
+  Future<Map<String, dynamic>> attachAgent(
+    String callId, {
+    required String purpose,
+    String? context,
+    String? peerLanguage,
+    int? maxSeconds,
+    String? opener,
+  }) =>
+      post('/app/voice/calls/$callId/agent', body: {
+        'purpose': purpose,
+        if (context != null) 'context': context,
+        if (peerLanguage != null) 'peer_language': peerLanguage,
+        if (maxSeconds != null) 'max_seconds': maxSeconds,
+        if (opener != null) 'opener': opener,
+      }).then((raw) => Map<String, dynamic>.from(raw as Map));
+
+  Future<Map<String, dynamic>> agentHandover(String callId) =>
+      post('/app/voice/calls/$callId/agent/handover')
+          .then((raw) => Map<String, dynamic>.from(raw as Map));
+
+  Future<Map<String, dynamic>> callSummary(String callId) async =>
+      Map<String, dynamic>.from(
+          await get('/app/voice/calls/$callId/summary') as Map);
+
+  // ------------------------------------------------------- ai call tasks
+
+  Future<Map<String, dynamic>> createAiCallTask({
+    required String purpose,
+    String? number,
+    String direction = 'outbound',
+    String? context,
+    String? language,
+    String? peerLanguage,
+    int? maxSeconds,
+    String? reference,
+  }) =>
+      post('/app/ai-call/tasks', body: {
+        'purpose': purpose,
+        if (number != null) 'number': number,
+        'direction': direction,
+        if (context != null) 'context': context,
+        if (language != null) 'language': language,
+        if (peerLanguage != null) 'peer_language': peerLanguage,
+        if (maxSeconds != null) 'max_seconds': maxSeconds,
+        if (reference != null) 'reference': reference,
+      }).then((raw) => Map<String, dynamic>.from(raw as Map));
+
+  Future<List<Map<String, dynamic>>> aiCallTasks({
+    int limit = 50,
+    String? status,
+  }) async {
+    final raw = await get('/app/ai-call/tasks', query: {
+      'limit': limit,
+      if (status != null) 'task_status': status,
+    });
+    final items = (raw['items'] as List?) ?? const <dynamic>[];
+    return items
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList(growable: false);
+  }
+
+  Future<Map<String, dynamic>> aiCallTask(int id) async =>
+      Map<String, dynamic>.from(await get('/app/ai-call/tasks/$id') as Map);
+
+  Future<Map<String, dynamic>> cancelAiCallTask(int id) =>
+      post('/app/ai-call/tasks/$id/cancel')
+          .then((raw) => Map<String, dynamic>.from(raw as Map));
+
   // -------------------------------------------------------------- admin
 
   Future<Map<String, dynamic>> settings() async {

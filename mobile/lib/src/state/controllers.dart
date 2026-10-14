@@ -609,6 +609,230 @@ class AiController extends BaseController {
 }
 
 // --------------------------------------------------------------------------
+// AI calls: live translation, the call agent and AI call tasks
+// --------------------------------------------------------------------------
+
+/// Everything the gateway does on top of a live call, plus the AI call queue.
+///
+/// The server pushes transcript lines and translations over the socket, so the
+/// in-call subtitles update without polling; the task list refreshes when a
+/// task event arrives.
+class AiCallsController extends BaseController {
+  AiCallsController(super.api);
+
+  Map<String, dynamic> _state = const {};
+  final Map<String, Map<String, dynamic>> _flows = {};
+  final Map<String, List<Map<String, dynamic>>> _transcripts = {};
+  final Map<String, List<Map<String, dynamic>>> _subtitles = {};
+  List<Map<String, dynamic>> _tasks = const [];
+  bool _tasksLoaded = false;
+
+  Map<String, dynamic> get state => _state;
+  List<Map<String, dynamic>> get tasks => _tasks;
+  bool get tasksLoaded => _tasksLoaded;
+
+  Map<String, dynamic> flowFor(String callId) => _flows[callId] ?? const {};
+
+  List<Map<String, dynamic>> transcriptFor(String callId) =>
+      _transcripts[callId] ?? const [];
+
+  /// Subtitle lines for the in-call screen, in arrival order.
+  List<Map<String, dynamic>> subtitlesFor(String callId) =>
+      _subtitles[callId] ?? const [];
+
+  String translationModeFor(String callId) {
+    final translation = flowFor(callId)['translation'];
+    if (translation is Map) return (translation['mode'] ?? 'off').toString();
+    return 'off';
+  }
+
+  String? translationNoteFor(String callId) {
+    final note = flowFor(callId)['translation_note'];
+    return note is String && note.isNotEmpty ? note : null;
+  }
+
+  bool agentRunningFor(String callId) {
+    final agent = flowFor(callId)['agent'];
+    if (agent is! Map) return false;
+    return agent['finished'] != true && agent['pending'] != true;
+  }
+
+  bool handoverFor(String callId) => flowFor(callId)['handover'] == true;
+
+  Map<String, dynamic>? summaryFor(String callId) {
+    final summary = flowFor(callId)['summary'];
+    return summary is Map ? Map<String, dynamic>.from(summary) : null;
+  }
+
+  Future<void> refreshState() => guard(() async {
+    _state = await api.flowState();
+    notifyListeners();
+    return null;
+  });
+
+  Future<void> refreshFlow(String callId) => guard(() async {
+    try {
+      _flows[callId] = await api.callFlow(callId);
+    } on ApiException catch (e) {
+      // A call the server no longer tracks is not an error worth showing.
+      if (e.statusCode != 404) rethrow;
+    }
+    notifyListeners();
+    return null;
+  }, setBusy: false);
+
+  Future<void> refreshTranscript(String callId) => guard(() async {
+    _transcripts[callId] = await api.callTranscript(callId);
+    notifyListeners();
+    return null;
+  }, setBusy: false);
+
+  Future<void> refreshTasks({String? status}) => guard(() async {
+    _tasks = await api.aiCallTasks(status: status);
+    _tasksLoaded = true;
+    notifyListeners();
+    return null;
+  });
+
+  Future<Map<String, dynamic>?> createTask({
+    required String purpose,
+    String? number,
+    String direction = 'outbound',
+    String? context,
+    String? peerLanguage,
+    int? maxSeconds,
+  }) async {
+    final result = await guard(() => api.createAiCallTask(
+      purpose: purpose,
+      number: number,
+      direction: direction,
+      context: context,
+      peerLanguage: peerLanguage,
+      maxSeconds: maxSeconds,
+    ));
+    if (result != null) unawaited(refreshTasks());
+    return result;
+  }
+
+  Future<bool> cancelTask(int id) async {
+    final result = await guard(() => api.cancelAiCallTask(id));
+    if (result != null) unawaited(refreshTasks());
+    return result != null;
+  }
+
+  Future<bool> setTranslation(
+    String callId, {
+    String? mode,
+    String? cadence,
+    String? myLanguage,
+    String? peerLanguage,
+  }) async {
+    final result = await guard(() => api.setTranslation(
+      callId,
+      mode: mode,
+      cadence: cadence,
+      myLanguage: myLanguage,
+      peerLanguage: peerLanguage,
+    ), setBusy: false);
+    if (result == null) return false;
+    _adoptFlow(callId, result);
+    return true;
+  }
+
+  Future<bool> say(String callId, String text) async {
+    final result = await guard(() => api.sayToCall(callId, text), setBusy: false);
+    if (result == null) return false;
+    final spoken = result['spoken'];
+    if (spoken is String && spoken.isNotEmpty) {
+      final subs = _subtitles.putIfAbsent(callId, () => []);
+      subs.add({
+        'kind': 'line',
+        'entry': {'role': 'me', 'content': text, 'spoken': spoken},
+      });
+      notifyListeners();
+    }
+    return true;
+  }
+
+  Future<bool> attachAgent(
+    String callId, {
+    required String purpose,
+    String? context,
+    String? peerLanguage,
+    int? maxSeconds,
+  }) async {
+    final result = await guard(() => api.attachAgent(
+      callId,
+      purpose: purpose,
+      context: context,
+      peerLanguage: peerLanguage,
+      maxSeconds: maxSeconds,
+    ));
+    if (result == null) return false;
+    _adoptFlow(callId, result);
+    return true;
+  }
+
+  Future<bool> handover(String callId) async {
+    final result = await guard(() => api.agentHandover(callId));
+    if (result == null) return false;
+    _adoptFlow(callId, result);
+    return true;
+  }
+
+  Future<Map<String, dynamic>?> summary(String callId) =>
+      guard(() => api.callSummary(callId));
+
+  void _adoptFlow(String callId, Map<String, dynamic> result) {
+    final flow = result['flow'];
+    if (flow is Map) {
+      _flows[callId] = Map<String, dynamic>.from(flow);
+    }
+    notifyListeners();
+  }
+
+  void applyEvent(RealtimeEvent event) {
+    final callId = event.data['call_id']?.toString();
+    switch (event.event) {
+      case 'call.transcript':
+        if (callId == null) return;
+        final entry = event.data['entry'];
+        if (entry is! Map) return;
+        final line = Map<String, dynamic>.from(entry);
+        _transcripts.putIfAbsent(callId, () => []).add(line);
+        _subtitles.putIfAbsent(callId, () => []).add({'kind': 'line', 'entry': line});
+        notifyListeners();
+      case 'call.translation':
+        if (callId == null) return;
+        _subtitles
+            .putIfAbsent(callId, () => [])
+            .add({'kind': 'translation', 'entry': Map<String, dynamic>.from(event.data)});
+        final history = _flows[callId]?['translation_history'];
+        if (history is List) history.add(Map<String, dynamic>.from(event.data));
+        notifyListeners();
+      case 'call.flow':
+      case 'call.flow.ended':
+      case 'call.flow.handover':
+      case 'call.flow.capture_failed':
+        if (callId != null && event.data.isNotEmpty) {
+          _flows[callId] = Map<String, dynamic>.from(event.data);
+        }
+        notifyListeners();
+      case 'call.summary':
+        if (callId != null) {
+          _flows.putIfAbsent(callId, () => {})['summary'] = event.data['summary'];
+        }
+        notifyListeners();
+      case 'ai_call.task_queued':
+      case 'ai_call.task_started':
+      case 'ai_call.task_finished':
+      case 'ai_call.task_cancelled':
+        unawaited(refreshTasks());
+    }
+  }
+}
+
+// --------------------------------------------------------------------------
 // Gateway settings (admin)
 // --------------------------------------------------------------------------
 
