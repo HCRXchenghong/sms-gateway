@@ -189,11 +189,15 @@ class CallRecord extends CallSession {
     this.deviceName,
     this.deviceCode,
     this.simNumber,
+    this.recordingPath,
   });
 
   final String? deviceName;
   final String? deviceCode;
   final String? simNumber;
+  final String? recordingPath;
+
+  bool get hasRecording => recordingPath != null && recordingPath!.isNotEmpty;
 
   factory CallRecord.fromJson(Map<String, dynamic> json) {
     final dev = json['device'];
@@ -211,6 +215,7 @@ class CallRecord extends CallSession {
       deviceName: dev is Map ? _asStr(dev['display_name']) : null,
       deviceCode: dev is Map ? _asStr(dev['code']) : null,
       simNumber: _asStr(json['sim_number']),
+      recordingPath: _asStr(json['recording_path']),
     );
   }
 }

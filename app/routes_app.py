@@ -11,6 +11,7 @@ from . import repo, repo_admin, repo_threads, security
 from .auth import CurrentUser, get_current_user
 from .config import settings
 from .login_service import authenticate, client_ip, issue_session, user_payload
+from .hub import hub
 
 router = APIRouter(tags=["app"])
 
@@ -150,6 +151,49 @@ async def contacts_delete(contact_id: int, request: Request, user: CurrentUser =
 # ---------------------------------------------------------------------------
 
 
+class ConversationSelection(BaseModel):
+    peers: List[str] = Field(..., min_length=1, max_length=500)
+
+
+async def _sms_change(request: Request, user: CurrentUser, action: str, payload: dict):
+    await asyncio.to_thread(repo.audit, "user", user.id, user.username, client_ip(request),
+                            action, str(payload.get("peers", [])), 200)
+    await hub.publish("sms.conversations_changed", payload)
+
+
+@router.post("/app/conversations/bulk_delete")
+async def conversations_delete(body: ConversationSelection, request: Request,
+                               user: CurrentUser = Depends(get_current_user)):
+    if any(not repo_threads.peer_key(peer) or len(peer) > 64 for peer in body.peers):
+        raise HTTPException(400, "请选择有效的短信会话")
+    try:
+        result = await asyncio.to_thread(repo_threads.delete_conversations, body.peers)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+    await _sms_change(request, user, "sms.delete_conversations", result)
+    return result
+
+
+@router.post("/app/conversations/delete_read")
+async def conversations_delete_read(request: Request, user: CurrentUser = Depends(get_current_user)):
+    result = await asyncio.to_thread(repo_threads.delete_conversations, read_only=True)
+    await _sms_change(request, user, "sms.delete_read", result)
+    return result
+
+
+@router.delete("/app/conversations/{peer}")
+async def conversation_delete(peer: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+    return await conversations_delete(ConversationSelection(peers=[peer]), request, user)
+
+
+@router.post("/app/conversations/{peer}/unread")
+async def conversation_unread(peer: str, request: Request, user: CurrentUser = Depends(get_current_user)):
+    if not await asyncio.to_thread(repo_threads.mark_unread, peer):
+        raise HTTPException(404, "会话不存在")
+    await _sms_change(request, user, "sms.mark_unread", {"peers": [repo_threads.peer_key(peer)]})
+    return {"ok": True}
+
+
 @router.get("/app/conversations")
 async def conversations_list(
     request: Request,
@@ -175,17 +219,23 @@ async def conversation_messages(
     limit: int = 100,
     before: Optional[int] = None,
     device_id: Optional[int] = None,
+    mark_read: bool = True,
 ):
     if limit < 1 or limit > 500:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "limit must be 1..500")
     messages = await asyncio.to_thread(repo_threads.get_thread, peer, limit, before, device_id)
-    await asyncio.to_thread(repo_threads.mark_read, peer)
+    if mark_read:
+        cleared = await asyncio.to_thread(repo_threads.mark_read, peer, device_id)
+        if cleared:
+            await hub.publish("sms.conversations_changed", {"peers": [repo_threads.peer_key(peer)]})
     return {"peer": peer, "peer_key": repo_threads.peer_key(peer), "items": messages, "count": len(messages)}
 
 
 @router.post("/app/conversations/{peer}/read")
 async def conversation_read(peer: str, request: Request, user: CurrentUser = Depends(get_current_user)):
     cleared = await asyncio.to_thread(repo_threads.mark_read, peer)
+    if cleared:
+        await _sms_change(request, user, "sms.mark_read", {"peers": [repo_threads.peer_key(peer)]})
     return {"ok": True, "cleared": cleared}
 
 

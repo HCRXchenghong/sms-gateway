@@ -238,7 +238,6 @@ class SettingsPage extends StatelessWidget {
       applicationIcon: const Icon(Icons.cell_tower, size: 40),
       children: [
         const SizedBox(height: 8),
-        Text('服务器: ' + (scope.api.baseUrl ?? '未配置')),
         const SizedBox(height: 4),
         const Text('硬件: SIMCom A7670X / A7670G 4G USB 模块'),
         const SizedBox(height: 4),
@@ -252,7 +251,7 @@ class SettingsPage extends StatelessWidget {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('退出登录'),
-        content: const Text('退出后需要重新输入服务器地址与账号密码。'),
+        content: const Text('退出后需要重新输入账号密码。'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(dialogContext, false),

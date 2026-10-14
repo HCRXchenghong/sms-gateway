@@ -90,11 +90,14 @@ class DevicesController extends BaseController {
   /// The device used when the user has not picked one explicitly.
   DeviceInfo? get effective {
     final picked = byId(_preferredId);
-    if (picked != null && picked.isOnline) return picked;
-    return online.isNotEmpty ? online.first : (_items.isNotEmpty ? _items.first : null);
+    if (picked != null) return picked;
+    return online.isNotEmpty
+        ? online.first
+        : (_items.isNotEmpty ? _items.first : null);
   }
 
-  String labelFor(int? id) => byId(id)?.displayName ?? '设备' + (id ?? 0).toString();
+  String labelFor(int? id) =>
+      byId(id)?.displayName ?? '设备' + (id ?? 0).toString();
 
   void setPreferred(int? id) {
     _preferredId = id;
@@ -102,18 +105,18 @@ class DevicesController extends BaseController {
   }
 
   Future<void> refresh() => guard(() async {
-        _items = await api.devices();
-        if (_preferredId != null && byId(_preferredId) == null) _preferredId = null;
-        notifyListeners();
-        return null;
-      });
+    _items = await api.devices();
+    if (_preferredId != null && byId(_preferredId) == null) _preferredId = null;
+    notifyListeners();
+    return null;
+  });
 
   Future<void> rescan() => guard(() async {
-        await api.post('/app/devices/scan');
-        _items = await api.devices();
-        notifyListeners();
-        return null;
-      });
+    await api.post('/app/devices/scan');
+    _items = await api.devices();
+    notifyListeners();
+    return null;
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -161,19 +164,22 @@ class CallsController extends BaseController {
   }
 
   Future<void> refresh() => guard(() async {
-        final state = await api.voiceState();
-        _voiceEnabled = state['voice_enabled'] != false;
-        _maxConcurrent = (state['max_concurrent'] as num?)?.toInt() ?? 4;
-        _active = api.parseActive(state['active']);
-        notifyListeners();
-        return null;
-      });
+    final state = await api.voiceState();
+    _voiceEnabled = state['voice_enabled'] != false;
+    _maxConcurrent = (state['max_concurrent'] as num?)?.toInt() ?? 4;
+    _active = api.parseActive(state['active']);
+    notifyListeners();
+    return null;
+  });
 
   Future<void> refreshHistory({int limit = 50}) => guard(() async {
-        _history = await api.callHistory(limit: limit);
-        notifyListeners();
-        return null;
-      }, setBusy: false);
+    _history = await api.callHistory(limit: limit);
+    notifyListeners();
+    return null;
+  }, setBusy: false);
+
+  void unavailableDevice(String? label) =>
+      fail(label == null ? '没有可用设备' : '$label 已离线，请切换在线设备');
 
   Future<CallSession?> dial({required String number, int? deviceId}) =>
       guard(() async {
@@ -203,7 +209,10 @@ class CallsController extends BaseController {
   }
 
   Future<bool> speak(int deviceId, String text, {int? mode}) async {
-    final ok = await guard(() => api.speak(deviceId, text, mode: mode), setBusy: false);
+    final ok = await guard(
+      () => api.speak(deviceId, text, mode: mode),
+      setBusy: false,
+    );
     return ok != null;
   }
 
@@ -235,7 +244,9 @@ class CallsController extends BaseController {
         break;
       case 'call.ended':
         final payload = event.data;
-        final session = CallSession.fromJson(Map<String, dynamic>.from(payload));
+        final session = CallSession.fromJson(
+          Map<String, dynamic>.from(payload),
+        );
         _upsert(session);
         // Drop finished calls so the UI returns to the dialer.
         _active.removeWhere((c) => c.callId == session.callId);
@@ -248,6 +259,9 @@ class CallsController extends BaseController {
         final state = event.data['state']?.toString();
         _notice = describePrompt(prompt, state);
         notifyListeners();
+        break;
+      case 'call.recording':
+        unawaited(refreshHistory());
         break;
       case 'call.tts':
         notifyListeners();
@@ -287,6 +301,10 @@ class MessagesController extends BaseController {
 
   List<Conversation> _conversations = [];
   int _unreadTotal = 0;
+  String? _activePeer;
+  String? _activeKey;
+  String? _query;
+  int _listRequest = 0;
   final Map<String, List<SmsMessage>> _threads = {};
 
   List<Conversation> get conversations => _conversations;
@@ -294,24 +312,80 @@ class MessagesController extends BaseController {
 
   List<SmsMessage> thread(String peerKey) => _threads[peerKey] ?? const [];
 
-  Future<void> refreshConversations({String? q}) => guard(() async {
-        _conversations = await api.conversations(q: q);
-        _unreadTotal = _conversations.fold<int>(0, (sum, c) => sum + c.unread);
+  Future<void> refreshConversations({String? q, bool keepQuery = false}) =>
+      guard(() async {
+        if (!keepQuery) _query = q;
+        final request = ++_listRequest;
+        final data = await api.get(
+          '/app/conversations',
+          query: {'limit': 500, if (_query != null) 'q': _query},
+        );
+        if (request != _listRequest) return null;
+        _conversations = (data['items'] as List? ?? [])
+            .map(
+              (e) => Conversation.fromJson(Map<String, dynamic>.from(e as Map)),
+            )
+            .toList();
+        _unreadTotal =
+            (data['unread_total'] as num?)?.toInt() ??
+            _conversations.fold<int>(0, (sum, c) => sum + c.unread);
         notifyListeners();
         return null;
       });
 
-  Future<void> openThread(String peer, {String? peerKey}) => guard(() async {
-        final key = peerKey ?? peer;
-        final items = await api.thread(peer);
-        _threads[key] = items;
-        notifyListeners();
-        return null;
-      }, setBusy: false);
+  Future<void> openThread(String peer, {String? peerKey}) async {
+    _activePeer = peer;
+    _activeKey = peerKey ?? peer;
+    await _reloadThread(peer, _activeKey!, markRead: true);
+    await refreshConversations(keepQuery: true);
+  }
 
-  Future<bool> send({required String to, required String content, int? deviceId}) async {
-    final result = await guard(() => api.sendSms(to: to, content: content, deviceId: deviceId),
-        setBusy: false);
+  Future<void> _reloadThread(
+    String peer,
+    String key, {
+    bool markRead = false,
+  }) => guard(() async {
+    _threads[key] = await api.thread(peer, markRead: markRead);
+    notifyListeners();
+    return null;
+  }, setBusy: false);
+
+  void closeThread() {
+    _activePeer = null;
+    _activeKey = null;
+  }
+
+  Future<bool> markRead(String peer, {required bool read}) async {
+    final result = await guard(() => api.markConversation(peer, read: read));
+    if (result == null) return false;
+    await refreshConversations(keepQuery: true);
+    return true;
+  }
+
+  Future<bool> deleteThreads(
+    List<String> peers, {
+    bool readOnly = false,
+  }) async {
+    final result = await guard(
+      () => readOnly
+          ? api.deleteReadConversations()
+          : api.deleteConversations(peers),
+    );
+    if (result == null) return false;
+    _threads.clear();
+    await refreshConversations(keepQuery: true);
+    return true;
+  }
+
+  Future<bool> send({
+    required String to,
+    required String content,
+    int? deviceId,
+  }) async {
+    final result = await guard(
+      () => api.sendSms(to: to, content: content, deviceId: deviceId),
+      setBusy: false,
+    );
     if (result != null) {
       await refreshConversations();
       return true;
@@ -329,12 +403,15 @@ class MessagesController extends BaseController {
 
   void applyEvent(RealtimeEvent event) {
     if (!event.isSms) return;
-    // Any SMS event can change thread ordering or unread counts.
-    unawaited(refreshConversations());
-    final peer = (event.data['sender'] ?? event.data['recipient'] ?? '').toString();
-    if (peer.isNotEmpty && _threads.containsKey(peer)) {
-      unawaited(openThread(peer));
-    }
+    unawaited(refreshConversations(keepQuery: true));
+    final peer = _activePeer;
+    final key = _activeKey;
+    if (peer == null || key == null) return;
+    // Only the visible thread may become read. Cached/closed threads must
+    // never consume a later unread marker during a websocket refresh.
+    final isArrival =
+        event.event == 'sms.received' || event.event == 'sms.sent';
+    unawaited(_reloadThread(peer, key, markRead: isArrival));
   }
 
   Future<Map<String, dynamic>> search(String q) async {
@@ -362,7 +439,8 @@ class ContactsController extends BaseController {
     if (needle.isEmpty) return null;
     for (final c in _items) {
       final d = _digits(c.number);
-      if (d.isNotEmpty && (d == needle || d.endsWith(needle) || needle.endsWith(d))) {
+      if (d.isNotEmpty &&
+          (d == needle || d.endsWith(needle) || needle.endsWith(d))) {
         return c.name;
       }
     }
@@ -372,12 +450,12 @@ class ContactsController extends BaseController {
   static String _digits(String s) => s.replaceAll(RegExp(r'[^0-9]'), '');
 
   Future<void> refresh({String? q}) => guard(() async {
-        final page = await api.contacts(q: q);
-        _items = page.items;
-        _groups = page.groups;
-        notifyListeners();
-        return null;
-      });
+    final page = await api.contacts(q: q);
+    _items = page.items;
+    _groups = page.groups;
+    notifyListeners();
+    return null;
+  });
 
   Future<bool> save(Contact contact) async {
     final ok = await guard(() async {
@@ -418,11 +496,11 @@ class AudioController extends BaseController {
   String? get playingPrompt => _playingPrompt;
 
   Future<void> refresh() => guard(() async {
-        _state = await api.audioDevices();
-        _prompts = await api.prompts();
-        notifyListeners();
-        return null;
-      });
+    _state = await api.audioDevices();
+    _prompts = await api.prompts();
+    notifyListeners();
+    return null;
+  });
 
   Future<bool> setOutput(String device) async {
     final next = await guard(() => api.setOutput(device));
@@ -484,10 +562,10 @@ class AiController extends BaseController {
   String get ttsEngine => (_status['tts_engine'] ?? 'module').toString();
 
   Future<void> refresh() => guard(() async {
-        _status = await api.aiStatus();
-        notifyListeners();
-        return null;
-      });
+    _status = await api.aiStatus();
+    notifyListeners();
+    return null;
+  });
 
   void clearHistory() {
     _history.clear();
@@ -499,7 +577,10 @@ class AiController extends BaseController {
     _sending = true;
     _history.add(ChatTurn(role: 'user', content: message));
     notifyListeners();
-    final reply = await guard(() => api.chat(message: message, history: _history), setBusy: false);
+    final reply = await guard(
+      () => api.chat(message: message, history: _history),
+      setBusy: false,
+    );
     _sending = false;
     if (reply == null) {
       _history.removeLast();
@@ -538,18 +619,20 @@ class SettingsController extends BaseController {
   }
 
   Future<void> refresh() => guard(() async {
-        final data = await api.settings();
-        _values = Map<String, dynamic>.from(data['settings'] as Map? ?? {});
-        _editable = ((data['editable'] as List?) ?? const []).map((e) => e.toString()).toList();
-        notifyListeners();
-        return null;
-      });
+    final data = await api.settings();
+    _values = Map<String, dynamic>.from(data['settings'] as Map? ?? {});
+    _editable = ((data['editable'] as List?) ?? const [])
+        .map((e) => e.toString())
+        .toList();
+    notifyListeners();
+    return null;
+  });
 
   Future<void> refreshStats() => guard(() async {
-        _stats = await api.stats();
-        notifyListeners();
-        return null;
-      }, setBusy: false);
+    _stats = await api.stats();
+    notifyListeners();
+    return null;
+  }, setBusy: false);
 
   Future<bool> save(Map<String, dynamic> patch) async {
     final data = await guard(() => api.saveSettings(patch));
@@ -580,10 +663,10 @@ class UsersController extends BaseController {
   List<Map<String, dynamic>> get items => _items;
 
   Future<void> refresh() => guard(() async {
-        _items = await api.users();
-        notifyListeners();
-        return null;
-      });
+    _items = await api.users();
+    notifyListeners();
+    return null;
+  });
 
   Future<bool> create({
     required String username,
@@ -591,14 +674,32 @@ class UsersController extends BaseController {
     String role = 'operator',
     String? displayName,
   }) async {
-    final ok = await guard(() =>
-        api.createUser(username: username, password: password, role: role, displayName: displayName));
+    final ok = await guard(
+      () => api.createUser(
+        username: username,
+        password: password,
+        role: role,
+        displayName: displayName,
+      ),
+    );
     if (ok != null) await refresh();
     return ok != null;
   }
 
-  Future<bool> update(int id, {String? role, bool? isActive, String? displayName}) async {
-    final ok = await guard(() => api.updateUser(id, role: role, isActive: isActive, displayName: displayName));
+  Future<bool> update(
+    int id, {
+    String? role,
+    bool? isActive,
+    String? displayName,
+  }) async {
+    final ok = await guard(
+      () => api.updateUser(
+        id,
+        role: role,
+        isActive: isActive,
+        displayName: displayName,
+      ),
+    );
     if (ok != null) await refresh();
     return ok != null;
   }
@@ -614,4 +715,3 @@ class UsersController extends BaseController {
     return ok != null;
   }
 }
-

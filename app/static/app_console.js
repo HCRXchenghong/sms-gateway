@@ -364,14 +364,27 @@
                 tr.appendChild(el('td', null, STATE_LABEL[c.state] || c.state || '-'));
                 tr.appendChild(el('td', null, REASON_LABEL[c.end_reason] || c.end_reason || '-'));
                 tr.appendChild(el('td', null, fmtDuration(c.duration)));
+                var recCell = el('td');
+                if (c.recording_path) {
+                    var link = el('a', {
+                        href: '/app/voice/calls/' + encodeURIComponent(c.call_id) + '/recording',
+                        target: '_blank',
+                        rel: 'noopener'
+                    }, '播放');
+                    link.className = 'linklike';
+                    recCell.appendChild(link);
+                } else {
+                    recCell.textContent = '-';
+                }
+                tr.appendChild(recCell);
                 tbody.appendChild(tr);
             });
             if (!tbody.children.length) {
-                tbody.appendChild(el('tr', null)).appendChild(el('td', { colspan: '7', class: 'empty-state' }, '还没有通话记录'));
+                tbody.appendChild(el('tr', null)).appendChild(el('td', { colspan: '8', class: 'empty-state' }, '还没有通话记录'));
             }
         } catch (e) {
             tbody.innerHTML = '';
-            tbody.appendChild(el('tr', null)).appendChild(el('td', { colspan: '7' }, '读取失败：' + e.message));
+            tbody.appendChild(el('tr', null)).appendChild(el('td', { colspan: '8' }, '读取失败：' + e.message));
         }
     }
 

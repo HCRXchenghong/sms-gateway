@@ -93,9 +93,11 @@ class _HomePageState extends State<HomePage> {
           NavigationDestination(
             icon: Badge(
               isLabelVisible: scope.messages.unreadTotal > 0,
-              label: Text(scope.messages.unreadTotal > 99
-                  ? '99+'
-                  : scope.messages.unreadTotal.toString()),
+              label: Text(
+                scope.messages.unreadTotal > 99
+                    ? '99+'
+                    : scope.messages.unreadTotal.toString(),
+              ),
               child: const Icon(Icons.chat_bubble_outline),
             ),
             selectedIcon: const Icon(Icons.chat_bubble),
@@ -167,13 +169,14 @@ class _DevicePicker extends StatelessWidget {
         child: Text('无设备', style: TextStyle(fontSize: 12)),
       );
     }
-    return PopupMenuButton<int?>(
+    return PopupMenuButton<int>(
       tooltip: '选择发送设备',
-      onSelected: (id) => context.read<AppScope>().selectDevice(id),
+      onSelected: (id) =>
+          context.read<AppScope>().selectDevice(id == -1 ? null : id),
       itemBuilder: (context) => [
-        const PopupMenuItem<int?>(value: null, child: Text('自动选择在线设备')),
+        const PopupMenuItem<int>(value: -1, child: Text('自动选择在线设备')),
         for (final d in devices.items)
-          PopupMenuItem<int?>(
+          PopupMenuItem<int>(
             value: d.id,
             child: Row(
               children: [
@@ -185,7 +188,9 @@ class _DevicePicker extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    d.displayName + (d.simNumber == null ? '' : '  ' + d.simNumber!),
+                    d.displayName +
+                        (d.isOnline ? '' : '（离线）') +
+                        (d.simNumber == null ? '' : '  ' + d.simNumber!),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -198,10 +203,16 @@ class _DevicePicker extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.sim_card_outlined,
-                size: 16, color: effective.isOnline ? Colors.green : Colors.grey),
+            Icon(
+              Icons.sim_card_outlined,
+              size: 16,
+              color: effective.isOnline ? Colors.green : Colors.grey,
+            ),
             const SizedBox(width: 4),
-            Text(effective.displayName, style: const TextStyle(fontSize: 13)),
+            Text(
+              effective.displayName + (effective.isOnline ? '' : '（离线）'),
+              style: const TextStyle(fontSize: 13),
+            ),
             const Icon(Icons.arrow_drop_down, size: 18),
           ],
         ),
@@ -209,4 +220,3 @@ class _DevicePicker extends StatelessWidget {
     );
   }
 }
-

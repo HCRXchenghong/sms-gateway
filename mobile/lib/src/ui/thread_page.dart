@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 import '../config/app_theme.dart';
 import '../data/models.dart';
 import '../state/app_scope.dart';
+import '../state/controllers.dart';
 
 class ThreadPage extends StatefulWidget {
   const ThreadPage({super.key, required this.peer, this.peerKey, this.title});
@@ -27,12 +28,14 @@ class _ThreadPageState extends State<ThreadPage> {
   final ScrollController _scroll = ScrollController();
   Timer? _draftTimer;
   bool _sending = false;
+  late final MessagesController _messages;
 
   String get _peer => widget.peer;
 
   @override
   void initState() {
     super.initState();
+    _messages = context.read<AppScope>().messages;
     _load();
     // Restore any draft saved on the server for this peer.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -50,10 +53,10 @@ class _ThreadPageState extends State<ThreadPage> {
   }
 
   Future<void> _load() async {
-    await context
-        .read<AppScope>()
-        .messages
-        .openThread(_peer, peerKey: widget.peerKey ?? _peer);
+    await context.read<AppScope>().messages.openThread(
+      _peer,
+      peerKey: widget.peerKey ?? _peer,
+    );
     if (mounted) _scrollToBottom();
   }
 
@@ -73,15 +76,29 @@ class _ThreadPageState extends State<ThreadPage> {
     _draftTimer = Timer(const Duration(milliseconds: 800), () {
       if (!mounted) return;
       final text = _input.text.trim();
-      context.read<AppScope>().messages.saveDraft(_peer, text.isEmpty ? null : text);
+      context.read<AppScope>().messages.saveDraft(
+        _peer,
+        text.isEmpty ? null : text,
+      );
     });
   }
 
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _sending) return;
-    setState(() => _sending = true);
     final scope = context.read<AppScope>();
+    final device = scope.devices.effective;
+    if (device == null || !device.isOnline) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            device == null ? '没有可用设备' : '${device.displayName} 已离线，请切换在线设备',
+          ),
+        ),
+      );
+      return;
+    }
+    setState(() => _sending = true);
     final ok = await scope.messages.send(
       to: _peer,
       content: text,
@@ -113,6 +130,7 @@ class _ThreadPageState extends State<ThreadPage> {
 
   @override
   void dispose() {
+    _messages.closeThread();
     _draftTimer?.cancel();
     _input.dispose();
     _scroll.dispose();
@@ -134,10 +152,13 @@ class _ThreadPageState extends State<ThreadPage> {
           children: [
             Text(title, style: const TextStyle(fontSize: 17)),
             if (contactName != null)
-              Text(_peer,
-                  style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              Text(
+                _peer,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
           ],
         ),
         actions: [
@@ -166,7 +187,10 @@ class _ThreadPageState extends State<ThreadPage> {
                 ? const Center(child: Text('还没有消息，发一条试试'))
                 : ListView.builder(
                     controller: _scroll,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
                     itemCount: items.length,
                     itemBuilder: (context, i) => _Bubble(message: items[i]),
                   ),
@@ -197,7 +221,9 @@ class _ThreadPageState extends State<ThreadPage> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext), child: const Text('取消')),
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('取消'),
+          ),
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, controller.text),
             child: const Text('保存'),
@@ -207,7 +233,9 @@ class _ThreadPageState extends State<ThreadPage> {
     );
     final trimmed = (name ?? '').trim();
     if (trimmed.isEmpty) return;
-    final ok = await scope.contacts.save(Contact(id: 0, name: trimmed, number: _peer));
+    final ok = await scope.contacts.save(
+      Contact(id: 0, name: trimmed, number: _peer),
+    );
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(ok ? '已保存到通讯录' : '保存失败')));
@@ -226,7 +254,10 @@ class _Bubble extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final isDark = scheme.brightness == Brightness.dark;
     final bg = outgoing
-        ? Color.alphaBlend(AppTheme.bubbleOut.withValues(alpha: 0.55), scheme.surface)
+        ? Color.alphaBlend(
+            AppTheme.bubbleOut.withValues(alpha: 0.55),
+            scheme.surface,
+          )
         : (isDark ? scheme.surfaceContainerHighest : AppTheme.bubbleIn);
     final dt = DateTime.fromMillisecondsSinceEpoch(message.at * 1000);
     return Align(
@@ -234,8 +265,9 @@ class _Bubble extends StatelessWidget {
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 3),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        constraints:
-            BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.74),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.74,
+        ),
         decoration: BoxDecoration(
           color: bg,
           borderRadius: BorderRadius.only(
@@ -248,19 +280,28 @@ class _Bubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            Text(message.content,
-                style: const TextStyle(fontSize: 15, height: 1.35)),
+            Text(
+              message.content,
+              style: const TextStyle(fontSize: 15, height: 1.35),
+            ),
             const SizedBox(height: 2),
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(_time.format(dt),
-                    style:
-                        TextStyle(fontSize: 10, color: scheme.onSurfaceVariant)),
+                Text(
+                  _time.format(dt),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
                 if (message.isPending) ...[
                   const SizedBox(width: 4),
-                  Icon(Icons.hourglass_empty,
-                      size: 11, color: scheme.onSurfaceVariant),
+                  Icon(
+                    Icons.hourglass_empty,
+                    size: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ],
                 if (message.failed) ...[
                   const SizedBox(width: 4),
@@ -307,7 +348,10 @@ class _Composer extends StatelessWidget {
                 keyboardType: TextInputType.multiline,
                 decoration: const InputDecoration(
                   hintText: '输入短信内容',
-                  contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  contentPadding: EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
                 ),
                 onSubmitted: (_) => onSend(),
               ),
@@ -326,7 +370,8 @@ class _Composer extends StatelessWidget {
                     ? const SizedBox(
                         width: 18,
                         height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2))
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
                     : const Icon(Icons.send, size: 20),
               ),
             ),
@@ -336,4 +381,3 @@ class _Composer extends StatelessWidget {
     );
   }
 }
-

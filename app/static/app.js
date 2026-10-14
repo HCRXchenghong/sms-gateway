@@ -498,6 +498,8 @@
         renderOutbox((await outbox.json()).items || []);
     }
 
+    window.addEventListener('gateway-sms-refresh', refreshMessages);
+
     $('#message-device-filter').addEventListener('change', function(e) {
         state.activeDeviceFilter = e.target.value;
         refreshMessages();
@@ -685,7 +687,8 @@
             try {
                 var msg = JSON.parse(ev.data);
                 if (msg.event === 'sms.received') prependInbox(msg.data);
-                if (msg.event === 'sms.sent') refreshMessages();
+                if (msg.event === 'sms.sent' || msg.event === 'sms.conversations_changed') refreshMessages();
+                if ((msg.event || '').startsWith('sms.')) window.dispatchEvent(new CustomEvent('gateway-sms', { detail: msg }));
             } catch (e) {}
         };
     }

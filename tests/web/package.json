@@ -1,0 +1,1 @@
+{"name":"gateway-web-integration","private":true,"type":"module","scripts":{"test:sms":"node sms_management.mjs"},"devDependencies":{"jsdom":"30.1.2"}}

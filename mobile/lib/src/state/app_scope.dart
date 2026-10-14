@@ -8,6 +8,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../config/server_config.dart';
 import '../data/api_client.dart';
 import '../data/models.dart';
 import '../data/realtime_client.dart';
@@ -18,8 +19,8 @@ enum AuthPhase { unknown, loggedOut, loggedIn }
 
 class AppScope extends ChangeNotifier {
   AppScope({ApiClient? api, SessionStore? store})
-      : api = api ?? ApiClient(),
-        store = store ?? SessionStore() {
+    : api = api ?? ApiClient(),
+      store = store ?? SessionStore() {
     devices = DevicesController(this.api);
     calls = CallsController(this.api);
     messages = MessagesController(this.api);
@@ -112,9 +113,15 @@ class AppScope extends ChangeNotifier {
     notifyListeners();
     try {
       await store.init();
-      final server = store.serverUrl;
+      final server = SessionStore.normalizeUrl(builtInServerUrl);
+      // Never send a saved credential to a different deployment after upgrade.
+      if (store.serverUrl != server) {
+        await store.clearSession();
+        await store.savePreferredDevice(null);
+        await store.saveServer(server);
+      }
       final token = store.token;
-      if (server == null || server.isEmpty || token == null || token.isEmpty) {
+      if (server.isEmpty || token == null || token.isEmpty) {
         _phase = AuthPhase.loggedOut;
         return false;
       }
@@ -124,7 +131,8 @@ class AppScope extends ChangeNotifier {
       _user = me.user;
       _caps = me.caps;
       _phase = AuthPhase.loggedIn;
-      if (store.preferredDeviceId != null) devices.setPreferred(store.preferredDeviceId);
+      if (store.preferredDeviceId != null)
+        devices.setPreferred(store.preferredDeviceId);
       unawaited(_loadEverything());
       _connectRealtime();
       return true;
@@ -243,8 +251,14 @@ class AppScope extends ChangeNotifier {
   }
 
   /// Convenience wrapper used by the dialer.
-  Future<CallSession?> dial(String number) =>
-      calls.dial(number: number, deviceId: devices.effective?.id);
+  Future<CallSession?> dial(String number) async {
+    final device = devices.effective;
+    if (device == null || !device.isOnline) {
+      calls.unavailableDevice(device?.displayName);
+      return null;
+    }
+    return calls.dial(number: number, deviceId: device.id);
+  }
 
   RealtimeStatus get connectionStatus => realtime.status;
 
@@ -267,4 +281,3 @@ class AppScope extends ChangeNotifier {
     super.dispose();
   }
 }
-

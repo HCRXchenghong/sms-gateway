@@ -1,11 +1,10 @@
-/// Login screen. Asks for the server address because the gateway is
-/// self-hosted and every customer runs their own endpoint.
+/// Login to the gateway compiled into this build.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../data/session_store.dart';
+import '../config/server_config.dart';
 import '../state/app_scope.dart';
 
 class LoginPage extends StatefulWidget {
@@ -18,11 +17,6 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   final _formKey = GlobalKey<FormState>();
 
-  /// host[:port] with an optional scheme and path; spaces and stray text fail.
-  static final RegExp _serverPattern =
-      RegExp(r'^(https?://)?[A-Za-z0-9._-]+(:\d+)?(/\S*)?$');
-
-  late final TextEditingController _server;
   late final TextEditingController _username;
   final TextEditingController _password = TextEditingController();
   final TextEditingController _code = TextEditingController();
@@ -34,13 +28,11 @@ class _LoginPageState extends State<LoginPage> {
   void initState() {
     super.initState();
     final store = context.read<AppScope>().store;
-    _server = TextEditingController(text: store.serverUrl ?? '');
     _username = TextEditingController(text: store.lastUsername ?? '');
   }
 
   @override
   void dispose() {
-    _server.dispose();
     _username.dispose();
     _password.dispose();
     _code.dispose();
@@ -52,7 +44,7 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => _busy = true);
     final scope = context.read<AppScope>();
     final ok = await scope.login(
-      serverUrl: _server.text,
+      serverUrl: builtInServerUrl,
       username: _username.text.trim(),
       password: _password.text,
       code: _code.text.trim(),
@@ -63,9 +55,8 @@ class _LoginPageState extends State<LoginPage> {
       _needTotp = !ok && (scope.loginError ?? '').contains('totp');
     });
     if (!ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(scope.loginError ?? '登录失败')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(scope.loginError ?? '登录失败')));
     }
   }
 
@@ -86,36 +77,19 @@ class _LoginPageState extends State<LoginPage> {
                   children: [
                     Icon(Icons.cell_tower, size: 52, color: scheme.primary),
                     const SizedBox(height: 12),
-                    Text('VoiceSMS Gateway',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.headlineSmall),
-                    const SizedBox(height: 4),
-                    Text('4G 语音短信网关',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant)),
-                    const SizedBox(height: 32),
-                    TextFormField(
-                      controller: _server,
-                      keyboardType: TextInputType.url,
-                      autocorrect: false,
-                      decoration: const InputDecoration(
-                        labelText: '服务器地址',
-                        hintText: 'https://gw.example.com:8443',
-                        prefixIcon: Icon(Icons.dns_outlined),
-                      ),
-                      validator: (v) {
-                        final value = (v ?? '').trim();
-                        if (value.isEmpty) return '请填写服务器地址';
-                        // Uri.parse percent-encodes spaces, so "not a url" would
-                        // otherwise pass a host check. Match the shape first.
-                        if (!_serverPattern.hasMatch(value)) return '地址格式不正确';
-                        final uri = Uri.tryParse(SessionStore.normalizeUrl(value));
-                        if (uri == null || uri.host.isEmpty) return '地址格式不正确';
-                        return null;
-                      },
-                      onFieldSubmitted: (_) => _submit(),
+                    Text(
+                      'VoiceSMS Gateway',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.headlineSmall,
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 4),
+                    Text(
+                      '4G 语音短信网关',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium
+                          ?.copyWith(color: scheme.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 32),
                     TextFormField(
                       controller: _username,
                       autocorrect: false,
@@ -124,18 +98,23 @@ class _LoginPageState extends State<LoginPage> {
                         labelText: '账号',
                         prefixIcon: Icon(Icons.person_outline),
                       ),
-                      validator: (v) => (v ?? '').trim().isEmpty ? '请填写账号' : null,
+                      validator: (v) =>
+                          (v ?? '').trim().isEmpty ? '请填写账号' : null,
                     ),
                     const SizedBox(height: 14),
                     TextFormField(
                       controller: _password,
                       obscureText: _obscure,
-                      textInputAction: _needTotp ? TextInputAction.next : TextInputAction.done,
+                      textInputAction: _needTotp
+                          ? TextInputAction.next
+                          : TextInputAction.done,
                       decoration: InputDecoration(
                         labelText: '密码',
                         prefixIcon: const Icon(Icons.lock_outline),
                         suffixIcon: IconButton(
-                          icon: Icon(_obscure ? Icons.visibility_off : Icons.visibility),
+                          icon: Icon(
+                            _obscure ? Icons.visibility_off : Icons.visibility,
+                          ),
                           onPressed: () => setState(() => _obscure = !_obscure),
                         ),
                       ),
@@ -163,16 +142,17 @@ class _LoginPageState extends State<LoginPage> {
                       onPressed: _busy ? null : _submit,
                       child: _busy
                           ? const SizedBox(
-                              height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
                           : const Text('登录'),
                     ),
                     const SizedBox(height: 16),
                     Text(
                       '账号与密码由网关后台管理员分配。忘记密码请联系管理员在后台重置。',
                       textAlign: TextAlign.center,
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall
+                      style: Theme.of(context).textTheme.bodySmall
                           ?.copyWith(color: scheme.onSurfaceVariant),
                     ),
                   ],
@@ -185,4 +165,3 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 }
-

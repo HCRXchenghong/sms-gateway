@@ -29,6 +29,7 @@ from .routes_ai import router as ai_router
 from .routes_voice import router as voice_router
 from .routes_web import router as web_router
 from .voice.manager import CallManager
+from .voice.recorder import CallRecorder
 from .voice.state import CallSession
 from typing import Awaitable, Callable
 
@@ -66,7 +67,6 @@ def _configure_logging() -> None:
 async def _on_sms(device_id: int, sms: IncomingSms) -> None:
     """Persist an incoming SMS and broadcast over websocket."""
     msg_id = await asyncio.to_thread(repo.insert_inbox, device_id, sms)
-    await asyncio.to_thread(repo_threads.bump_unread, sms.sender, device_id, sms.received_at)
     device = await asyncio.to_thread(repo.get_device, device_id)
     device_payload = repo.serialize_device(device) if device else None
     await hub.publish(
@@ -140,6 +140,24 @@ async def lifespan(app: FastAPI):
             "call.prompt",
             {"device_id": device_id, "prompt": prompt_id, "state": state, "session": session_dict},
         )
+        # Capture follows the call: starts when both sides are connected and
+        # stops on hangup, so the CDR row carries the recording path.
+        rec_path = await recorder.on_state(state, session_dict)
+        if rec_path is not None:
+            if state == "active" and settings.audio_local_prompts:
+                asyncio.create_task(audio_player.play_prompt("recording_notice"))
+            if state == "ended":
+                await asyncio.to_thread(
+                    repo.audit,
+                    "system",
+                    session_dict.get("device_id"),
+                    "call",
+                    session_dict.get("call_id"),
+                    "call.recording.saved",
+                    str(rec_path),
+                    200,
+                )
+
         if not prompt_id:
             return
         if settings.audio_local_prompts:
@@ -216,6 +234,20 @@ async def lifespan(app: FastAPI):
     )
     modems.set_voice_handler(calls.on_voice_urc)
 
+    async def _persist_recording_path(call_id: str, path: str) -> None:
+        await asyncio.to_thread(repo_calls.update_call, call_id, recording_path=path)
+
+    recorder = CallRecorder(
+        audio_player,
+        enabled=lambda: _flag_from_settings("audio.record_enabled", settings.audio_record_enabled),
+        publish=hub.publish,
+        persist=_persist_recording_path,
+    )
+    # Let the console toggle win over the config default at runtime.
+    audio_player.record_enabled = lambda: _flag_from_settings(
+        "audio.record_enabled", settings.audio_record_enabled
+    )
+
     try:
         await audio_player.load()
     except Exception as e:
@@ -229,6 +261,7 @@ async def lifespan(app: FastAPI):
     app.state.modem = modems
     app.state.modems = modems
     app.state.calls = calls
+    app.state.recorder = recorder
     app.state.audio = audio_player
     app.state.ai = ai_engine
     task = asyncio.create_task(modems.run(), name="modem-manager")
@@ -244,6 +277,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await calls.stop()
+        await recorder.stop_all()
         await audio_player.stop_all()
         _sms_hooks.clear()
         modems.stop()

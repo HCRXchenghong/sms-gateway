@@ -103,3 +103,78 @@ mock 模式的端到端套件（`tests/test_live_integration.py`）与网页控�
 - AI 供应商 API Key（OpenAI 兼容 / 阿里云 / 讯飞均可），配置入口：网页后台"AI 设置"与 App"AI 设置"。
   未配置时所有 AI 功能自动落到离线 mock，保证可演示可测试。
 - 若需要通话内云端 TTS，请确认底板音频通路方案（见第 3 节第 2 条）。
+
+## 7. 通话录音链路（软件侧已完成）
+
+录音编排独立在 `app/voice/recorder.py`：通话进入 active 状态时对选中的输入声卡
+启动采集（arecord / parecord / pw-record 按后端自动选择），挂断时停止并把文件路径
+写回 CDR 的 recording_path。文件落在 `SMSGW_AUDIO_RECORD_DIR`（默认 /var/lib/sms-gateway/recordings），以 call_id 命名。
+
+- 开关：`SMSGW_AUDIO_RECORD_ENABLED` 设置启动默认值；网页后台的 audio.record_enabled 可运行时覆盖，无需重启。
+- 提示：启用本地提示音时，录音开始会播放 recording_notice（"本次通话可能被录音"）；远端可听性待音频接线联调。
+- 取回：`GET /app/voice/calls/{call_id}/recording` 流式返回 WAV；网页后台通话记录新增"录音"列可新窗口播放；App 通话记录显示红色录音标记。
+- 实时：WebSocket 推送 call.recording（started / stopped / empty），供控制台显示 REC 标记。
+- 现状：录音测试 5 项通过，包含模拟通话状态→PCM 采集替身→CDR 归档→鉴权下载，以及目录越界拒绝。
+  已修复接通状态没有普通提示音时跳过录音启动的问题；真实声卡采集与双向语音质量仍待接线验收。
+  通话音频通路等板子音频口接服务器声卡后联调（计划近日内），届时验证真实通话的录音文件与回放。
+
+## 8. App 内置服务器地址
+
+服务器地址编译进 App（`mobile/lib/src/config/server_config.dart` 的 builtInServerUrl），
+登录页不显示服务器地址或编辑入口，只显示账号和密码（需要双因素认证时再显示验证码）。
+登录和冷启动恢复都使用内置地址；升级后如部署地址改变，会清掉旧令牌并重新登录，避免把旧令牌发送到另一台服务器。
+当前默认是局域网网关 http://192.168.31.110:8811；
+后续切正式服务器时改这一处默认值，或打包时传 `--dart-define=SMSGW_SERVER_URL=https://你的域名` 覆盖。
+
+## 9. 设备切换与短信管理验收（2026-10-14）
+
+### 交付行为
+
+- 服务器地址完全内置，登录页仅账号、密码；部署地址改变后不复用旧网关令牌。
+- 手动选择编号 001/002 会显示离线并保留选择，重启仍有效；自动选择会切回在线的编号 003。
+- 离线拨号显示“编号002 已离线，请切换在线设备”，不会改用另一个 SIM 发起呼叫。
+- 短信点开即已读；长按会话可标未读/已读、删除、进入批量选择；右上角菜单可批量删除和删除已读。
+- 删除已读保留未读会话、草稿和正在发送的短信。选中正在发送的会话做批量删除时返回 409，整批不删除。
+- 网页“短信会话”提供相同的读/未读、单会话删除、全选/批量删除、删除已读；共享 WebSocket 通知与审计日志。
+- 会话按号码合并所有设备的记录，当前为网关共享收件箱，所有登录账号共享读/未读状态与删除结果。
+
+### 接口
+
+| 方法 | 地址 | 用途 |
+| --- | --- | --- |
+| GET | `/app/conversations/{peer}/messages` | 打开会话并标读；后台刷新传 `mark_read=false` |
+| POST | `/app/conversations/{peer}/read` | 标为已读 |
+| POST | `/app/conversations/{peer}/unread` | 标为未读 |
+| DELETE | `/app/conversations/{peer}` | 删除会话全部记录 |
+| POST | `/app/conversations/bulk_delete` | JSON `{"peers":["号码1","号码2"]}`，最多 500 个 |
+| POST | `/app/conversations/delete_read` | 清理符合条件的已读会话 |
+
+### 自动化与真机结果
+
+| 检查 | 结果 |
+| --- | --- |
+| 后端全量 pytest | 83 项通过；随后修正录音接线并增加 1 项集成测试 |
+| 录音修正后的通话/录音回归 | 31 项通过（包含上述新增录音集成测试） |
+| Flutter 全量 | 39 项通过；离线提示文案更新后短信/设备 3 项回归通过 |
+| Dart 静态分析 | 0 error / 0 warning；存量风格 info 保留 |
+| 原网页控制台 DOM 联调 | 51 项通过，包含账号管理、声卡与通话控制 |
+| 新增网页短信 DOM 联调 | 已读、未读、删除已读保护、取消删除、批量删除、计数和实时刷新通过 |
+| 三星 SM-F9360 真机 | 内置地址登录、001/002 切换、选择持久化、自动回到 003、离线拨号提示通过 |
+| 三星短信真机 | 点开已读、长按未读、长按删除、删除已读保护、全选批量删除均通过，并核对服务端数据 |
+
+删除实测使用独立模拟网关（8812）及专用测试短信；测试结束已替换回内置 `192.168.31.110:8811` 的正式局域网包并登录真实网关。原网关短信未参与删除测试。手机已恢复自动选择在线设备，输入法已恢复搜狗。
+
+截图：[登录页](evidence/2026-10-14/login.png)、[编号001](evidence/2026-10-14/device-001.png)、[编号002](evidence/2026-10-14/device-002.png)、[离线拨号提示](evidence/2026-10-14/offline-dial.png)、[短信长按](evidence/2026-10-14/sms-long-press.png)、[短信多选](evidence/2026-10-14/sms-multi-select.png)。
+
+APK：`mobile/build/app/outputs/flutter-apk/app-release.apk`（已通过 adb 覆盖安装）。
+
+SHA-256：`31107fc12e3f3a739df3775202591af6a5d035e2682390cfb590ca2bf68f3ede`。
+
+复现新增网页测试（必须指定独立模拟网关，测试会清理其中的短信）：
+
+```sh
+npm ci --prefix tests/web
+SMSGW_URL=http://127.0.0.1:8812 npm --prefix tests/web run test:sms
+```
+
+音频线尚未连接，因此真实双向语音、实时录音与 AI 生产服务的最终联调仍待后续，不计为已通过。

@@ -77,6 +77,23 @@
                 <select id="message-device-filter"></select>
             </div>
             <div class="panel">
+                <div class="section-head"><h3>短信会话</h3>
+                    <div class="actions"><button type="button" class="button" id="sms-refresh">刷新</button>
+                    <button type="button" class="button" id="sms-delete-selected" disabled>删除所选</button>
+                    <button type="button" class="button" id="sms-delete-read">删除已读</button></div>
+                </div>
+                <p class="hint">会话与 App 同步；点击查看即已读。删除会移除该号码在所有设备上的短信记录。</p>
+                <div id="sms-management-status" role="status"></div>
+                <table class="msglist" id="conversations-table">
+                    <thead><tr><th><input type="checkbox" id="sms-select-all" aria-label="全选会话"></th><th>号码</th><th>最近短信</th><th>状态</th><th>操作</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+                <div id="sms-thread" hidden><div class="section-head"><h4 id="sms-thread-title"></h4>
+                    <button type="button" class="button" id="sms-thread-close">关闭会话</button></div>
+                    <div id="sms-thread-messages"></div>
+                </div>
+            </div>
+            <div class="panel">
                 <h3>收件箱</h3>
                 <table class="msglist" id="inbox-table">
                     <thead><tr><th>时间</th><th>设备</th><th>发件人</th><th>内容</th></tr></thead>
@@ -195,7 +212,7 @@
                     </div>
                 </div>
                 <table class="msglist" id="calls-table">
-                    <thead><tr><th>时间</th><th>设备</th><th>方向</th><th>对方号码</th><th>状态</th><th>结束原因</th><th>时长</th></tr></thead>
+                    <thead><tr><th>时间</th><th>设备</th><th>方向</th><th>对方号码</th><th>状态</th><th>结束原因</th><th>时长</th><th>录音</th></tr></thead>
                     <tbody></tbody>
                 </table>
             </div>
@@ -439,4 +456,5 @@
 {% block scripts %}
 <script src="/static/app.js"></script>
 <script src="/static/app_console.js"></script>
+<script src="/static/app_messages.js"></script>
 {% endblock %}

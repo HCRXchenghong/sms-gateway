@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -193,6 +194,8 @@ async def voice_state(request: Request, user: CurrentUser = Depends(get_current_
         "online_device_ids": online,
         "active": active,
         "count": len(active),
+        "recording_call_ids": list(getattr(request.app.state, "recorder", None).active_call_ids
+                                 if getattr(request.app.state, "recorder", None) else []),
     }
 
 
@@ -279,6 +282,22 @@ async def voice_history(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "limit must be 1..500")
     rows = await asyncio.to_thread(repo_calls.list_calls, limit, device_id, remote, direction, since)
     return {"items": [repo_calls.serialize_call(r) for r in rows], "count": len(rows)}
+
+
+@router.get("/app/voice/calls/{call_id}/recording")
+async def call_recording(
+    call_id: str, request: Request, user: CurrentUser = Depends(get_current_user)
+):
+    """Stream the captured WAV of a finished call."""
+    row = await asyncio.to_thread(repo_calls.get_call, call_id)
+    stored = row["recording_path"] if row is not None else None
+    if not stored:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "this call has no recording")
+    path = Path(stored).resolve()
+    root = Path(settings.audio_record_dir).resolve()
+    if path.parent != root or not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "recording file is missing")
+    return FileResponse(path, media_type="audio/wav", filename=path.name)
 
 
 @router.get("/app/voice/stats")

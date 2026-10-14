@@ -7,6 +7,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
+from typing import Callable
 
 from .. import repo_admin
 from ..config import settings
@@ -78,6 +79,9 @@ class AudioPlayer:
         self._playing: Dict[str, asyncio.subprocess.Process] = {}
         self._recordings: List[RecordingHandle] = []
         self._loaded = False
+        # Runtime gate for capture. main.py swaps in the admin setting so the
+        # console toggle takes effect without restarting the gateway.
+        self.record_enabled: Callable[[], bool] = lambda: bool(settings.audio_record_enabled)
 
     # -- setup ----------------------------------------------------------
 
@@ -300,7 +304,7 @@ class AudioPlayer:
         return []
 
     async def start_recording(self, path: Path | str, *, device: Optional[str] = None) -> Optional[RecordingHandle]:
-        if not settings.audio_record_enabled:
+        if not self.record_enabled():
             log.info("recording disabled by configuration")
             return None
         target = Path(path)

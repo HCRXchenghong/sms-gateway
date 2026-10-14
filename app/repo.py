@@ -501,8 +501,11 @@ def serialize_device(row: sqlite3.Row) -> dict:
 
 
 def insert_inbox(device_id: Optional[int], sms: IncomingSms) -> int:
+    from .repo_threads import bump_unread
+
     now = security.now_epoch()
     with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
         sim_key, sim_iccid, sim_imsi, sim_number = _device_sim_snapshot(c, device_id)
         cur = c.execute(
             "INSERT INTO sms_inbox (device_id, sim_key, sim_iccid, sim_imsi, sim_number, sender, content, received_at, stored_at, raw_pdu, decode_error, udh_ref, udh_total, udh_seq)"
@@ -524,6 +527,8 @@ def insert_inbox(device_id: Optional[int], sms: IncomingSms) -> int:
                 sms.udh_seq,
             ),
         )
+        bump_unread(sms.sender, device_id, sms.received_at, conn=c)
+        c.commit()
         return int(cur.lastrowid)
 
 

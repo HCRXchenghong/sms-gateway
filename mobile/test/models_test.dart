@@ -212,5 +212,32 @@ void main() {
     expect(u.isAdmin, isFalse);
     expect(u.label, 'appdev');
   });
+
+  group('CallRecord', () {
+    test('exposes the recording path published by the gateway', () {
+      final r = CallRecord.fromJson(const {
+        'call_id': 'c-9',
+        'device_id': 3,
+        'direction': 'outbound',
+        'state': 'ended',
+        'remote': '15331986287',
+        'duration': 27,
+        'recording_path': '/var/lib/sms-gateway/recordings/c-9.wav',
+      });
+      expect(r.hasRecording, isTrue);
+      expect(r.recordingPath, endsWith('c-9.wav'));
+    });
+
+    test('calls without a capture report no recording', () {
+      final r = CallRecord.fromJson(const {
+        'call_id': 'c-10',
+        'device_id': 3,
+        'direction': 'inbound',
+        'state': 'ended',
+        'recording_path': null,
+      });
+      expect(r.hasRecording, isFalse);
+    });
+  });
 }
 

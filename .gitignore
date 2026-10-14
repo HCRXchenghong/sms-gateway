@@ -57,3 +57,7 @@ Thumbs.db
 # Project-private (not part of source)
 4G USB DONGLE A7670X/
 .kiro/
+
+# Local credential backups and web test dependencies
+.env.mock-backup
+node_modules/

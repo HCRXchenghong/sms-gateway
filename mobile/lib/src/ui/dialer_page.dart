@@ -66,7 +66,9 @@ class _DialerPageState extends State<DialerPage> with SingleTickerProviderStateM
     final device = scope.devices.effective;
     if (device == null || !device.isOnline) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('没有在线的 4G 模块，无法拨号')));
+          .showSnackBar(SnackBar(content: Text(device == null
+              ? '没有可用的 4G 模块'
+              : '${device.displayName} 已离线，请切换在线设备')));
       return;
     }
     final session = await scope.dial(number);
@@ -314,6 +316,14 @@ class _CallLogView extends StatelessWidget {
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (r.hasRecording)
+                  const Tooltip(
+                    message: '本通电话有录音',
+                    child: Padding(
+                      padding: EdgeInsets.only(right: 6),
+                      child: Icon(Icons.mic, size: 14, color: Colors.redAccent),
+                    ),
+                  ),
                 if (r.deviceCode != null)
                   Text(r.deviceCode!,
                       style: TextStyle(

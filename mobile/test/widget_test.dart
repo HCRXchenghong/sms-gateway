@@ -1,79 +1,83 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:voicesms_app/src/config/server_config.dart';
+import 'package:voicesms_app/src/data/api_client.dart';
 import 'package:voicesms_app/src/state/app_scope.dart';
 import 'package:voicesms_app/src/ui/login_page.dart';
 
 void main() {
-  testWidgets('login page renders the server, account and password fields',
-      (tester) async {
-    await tester.pumpWidget(
-      ChangeNotifierProvider<AppScope>(
-        create: (_) => AppScope(),
-        child: const MaterialApp(home: LoginPage()),
-      ),
-    );
-    await tester.pump();
+  testWidgets(
+    'login only shows account/password and uses compiled endpoint despite saved old address',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'smsgw.server_url': 'http://old.test',
+      });
+      Uri? called;
+      final scope = AppScope(
+        api: ApiClient(
+          httpClient: MockClient((request) async {
+            called = request.url;
+            return http.Response(
+              jsonEncode({'detail': '测试登录失败'}),
+              401,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }),
+        ),
+      );
+      await scope.store.init();
+      await tester.pumpWidget(
+        ChangeNotifierProvider.value(
+          value: scope,
+          child: const MaterialApp(home: LoginPage()),
+        ),
+      );
+      expect(find.byType(TextFormField), findsNWidgets(2));
+      expect(find.text('服务器地址'), findsNothing);
+      expect(find.text(builtInServerUrl), findsNothing);
+      await tester.tap(find.text('登录'));
+      await tester.pump();
+      expect(find.text('请填写账号'), findsOneWidget);
+      expect(find.text('请填写密码'), findsOneWidget);
+      await tester.enterText(find.byType(TextFormField).at(0), 'tester');
+      await tester.enterText(find.byType(TextFormField).at(1), 'password');
+      await tester.tap(find.text('登录'));
+      await tester.pumpAndSettle();
+      expect(called.toString(), '$builtInServerUrl/api/v1/auth/login');
+      await tester.pumpWidget(const SizedBox());
+      scope.dispose();
+    },
+  );
 
-    expect(find.text('VoiceSMS Gateway'), findsOneWidget);
-    expect(find.text('登录'), findsOneWidget);
-    // Server address, account and password. The TOTP field only appears after
-    // a login attempt reports that two factor auth is required.
-    expect(find.byType(TextFormField), findsNWidgets(3));
-
-    // Submitting an empty form must surface validation instead of a request.
-    await tester.tap(find.text('登录'));
-    await tester.pump();
-    expect(find.text('请填写服务器地址'), findsOneWidget);
-    expect(find.text('请填写账号'), findsOneWidget);
-    expect(find.text('请填写密码'), findsOneWidget);
-  });
-
-  testWidgets('login page rejects a malformed server address', (tester) async {
-    await tester.pumpWidget(
-      ChangeNotifierProvider<AppScope>(
-        create: (_) => AppScope(),
-        child: const MaterialApp(home: LoginPage()),
-      ),
-    );
-    await tester.pump();
-
-    await tester.enterText(find.byType(TextFormField).at(0), 'not a url');
-    await tester.enterText(find.byType(TextFormField).at(1), 'admin');
-    await tester.enterText(find.byType(TextFormField).at(2), 'secret');
-    await tester.tap(find.text('登录'));
-    await tester.pump();
-
-    expect(find.text('地址格式不正确'), findsOneWidget);
-  });
-
-  testWidgets('login page accepts a host with an explicit port', (tester) async {
-    // A gateway on a LAN address always carries a port. The validator regex once
-    // lost its backslashes ((:d+) instead of (:\d+)), which rejected every
-    // usable address on a real device while the widget test only covered the
-    // malformed case.
-    await tester.pumpWidget(
-      ChangeNotifierProvider<AppScope>(
-        create: (_) => AppScope(),
-        child: const MaterialApp(home: LoginPage()),
-      ),
-    );
-    await tester.pump();
-
-    await tester.enterText(
-        find.byType(TextFormField).at(0), 'http://192.168.31.110:8811');
-    await tester.enterText(find.byType(TextFormField).at(1), 'admin');
-    await tester.enterText(find.byType(TextFormField).at(2), 'secret');
-    await tester.tap(find.text('登录'));
-    await tester.pump();
-
-    expect(find.text('地址格式不正确'), findsNothing);
-  });
+  test(
+    'deployment change invalidates cached credentials before any request',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'smsgw.server_url': 'http://old.test',
+        'smsgw.token': 'old-secret',
+        'smsgw.preferred_device_id': 2,
+      });
+      var requests = 0;
+      final scope = AppScope(
+        api: ApiClient(
+          httpClient: MockClient((r) async {
+            requests++;
+            return http.Response('{}', 401);
+          }),
+        ),
+      );
+      expect(await scope.restore(), isFalse);
+      expect(requests, 0);
+      expect(scope.store.token, isNull);
+      expect(scope.store.preferredDeviceId, isNull);
+      expect(scope.store.serverUrl, builtInServerUrl);
+      scope.dispose();
+    },
+  );
 }
