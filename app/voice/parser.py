@@ -33,10 +33,25 @@ VOICE_URC_PREFIXES = (
     "+CIEV:",
     "+CEND:",
     "+CEER:",
+    # SIMCom A7670 firmware reports call progress with its own wording instead
+    # of the 3GPP CONNECT line. Captured from a real A7670G-LLSE session:
+    #   ATD15331986287;  ->  OK  ->  +CLCC rows  ->  VOICE CALL: BEGIN
+    #   ...              ->  VOICE CALL: END: 000015  ->  NO CARRIER
+    "VOICE CALL: BEGIN",
+    "VOICE CALL: END",
+    "+COLP:",
+    "+CLCC:",
 )
 
 # Terminal call-progress lines accepted as the end of an ATD/ATA response.
-CALL_PROGRESS_LINES = ("NO CARRIER", "BUSY", "NO ANSWER", "NO DIALTONE", "CONNECT")
+CALL_PROGRESS_LINES = (
+    "NO CARRIER",
+    "BUSY",
+    "NO ANSWER",
+    "NO DIALTONE",
+    "CONNECT",
+    "VOICE CALL: BEGIN",
+)
 
 _QUOTED = re.compile(r'"([^"]*)"')
 _DIGITS = re.compile(r"^\+?[0-9*#]{3,20}$")
@@ -121,6 +136,36 @@ def classify_voice_line(line: str) -> Optional[VoiceUrc]:
         return VoiceUrc(kind="no_dialtone", raw=stripped)
     if stripped.startswith("CONNECT"):
         return VoiceUrc(kind="connect", raw=stripped, value=_extract_int(stripped))
+
+    # SIMCom wording for "the far end answered". Mapping it onto the existing
+    # connect kind keeps the state machine firmware agnostic.
+    if stripped.startswith("VOICE CALL: BEGIN"):
+        return VoiceUrc(kind="connect", raw=stripped)
+
+    if stripped.startswith("VOICE CALL: END"):
+        # Trailing field is the talk time in seconds, e.g. "VOICE CALL: END: 000015".
+        parts = stripped.split(":")
+        payload = parts[-1] if len(parts) > 2 else stripped
+        return VoiceUrc(kind="cend", raw=stripped, value=_extract_int(payload))
+
+    if stripped.startswith("+COLP:"):
+        # Connected line identification: confirms the number we actually reached.
+        return VoiceUrc(kind="colp", raw=stripped, number=_extract_number(stripped[6:]))
+
+    if stripped.startswith("+CLCC:"):
+        # The module also pushes call list rows on every state change, which is
+        # faster than waiting for the next poll.
+        row = parse_clcc(stripped)
+        if row is None:
+            return None
+        stat = row.get("stat", "")
+        return VoiceUrc(
+            kind="clcc",
+            raw=stripped,
+            number=row.get("number") or None,
+            value=int(stat) if stat.isdigit() else None,
+            extra={"stat": stat, "dir": row.get("dir", "")},
+        )
 
     if stripped.startswith("+CLIP:"):
         return VoiceUrc(kind="clip", raw=stripped, number=_extract_number(stripped[6:]))

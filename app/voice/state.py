@@ -146,7 +146,11 @@ class CallStateMachine:
         self.session.state = to_state
         if to_state == CallState.ACTIVE and not self.session.answered_at:
             self.session.answered_at = now
-        if to_state == CallState.INCOMING and not self.session.ringing_at:
+        # ringing_at means "ringing started", which is INCOMING for a call we
+        # received and ALERTING for one we placed. Only stamping INCOMING left
+        # every outbound record with ringing_at=None even though the far end
+        # did ring, so ring duration could not be measured.
+        if to_state in (CallState.INCOMING, CallState.ALERTING) and not self.session.ringing_at:
             self.session.ringing_at = now
         if to_state == CallState.ENDED:
             self.session.ended_at = now
@@ -171,6 +175,11 @@ class CallStateMachine:
                 return self.start_inbound(number)
             return []
         if kind == "clip":
+            if number:
+                self.session.remote = number
+            return []
+        if kind == "colp":
+            # Connected line identification confirms the reached number.
             if number:
                 self.session.remote = number
             return []

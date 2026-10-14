@@ -144,6 +144,17 @@ class CallManager:
                     await self._announce(device_id, machine)
                 return
 
+            if urc.kind == "clcc":
+                # The A7670 pushes a call list row on every state change. Feeding
+                # it straight into the state machine removes the poll interval
+                # from the reaction time; handle_clcc is idempotent, so the row
+                # arriving again from the next poll changes nothing.
+                stat = (urc.extra or {}).get("stat", "")
+                if stat == "":
+                    return
+                await self._apply(machine.handle_clcc(stat, urc.number))
+                return
+
             transitions = machine.handle_urc(urc.kind, urc.number)
             await self._apply(transitions)
 

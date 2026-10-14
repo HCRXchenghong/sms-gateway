@@ -118,3 +118,61 @@ def test_session_serialisation_shape():
         assert key in payload
     assert payload["direction"] == "outbound"
     assert payload["state"] == "dialing"
+
+
+def test_outbound_alerting_stamps_ringing_at():
+    """ringing_at means ringing started, so an outbound call stamps it at ALERTING.
+
+    It used to be written only on INCOMING, which left every outbound record with
+    ringing_at=None even though the far end demonstrably rang, so ring duration
+    could not be measured for placed calls.
+    """
+    machine = _machine()
+    machine.start_outbound("15331986287")
+    assert machine.session.ringing_at is None
+    machine.handle_clcc("3")
+    assert machine.session.state == CallState.ALERTING
+    assert machine.session.ringing_at is not None
+
+
+def test_real_a7670_outbound_session_replay():
+    """Replay the exact URC sequence captured from an A7670G-LLSE voice call.
+
+    Recorded while dialling a real mobile over LTE (CSQ 29, operator 46000).
+    The firmware never sends CONNECT; it announces the answer with its own
+    VOICE CALL: BEGIN line and reports the talk time on VOICE CALL: END.
+    """
+    machine = _machine()
+    assert machine.start_outbound("15331986287")[0].to_state == CallState.DIALING
+
+    # +CLCC: 1,0,2 -> still dialing
+    machine.handle_clcc("2", "15331986287")
+    assert machine.session.state == CallState.DIALING
+
+    # +CLCC: 1,0,3 -> far end rings
+    machine.handle_clcc("3", "15331986287")
+    assert machine.session.state == CallState.ALERTING
+    assert machine.session.ringing_at is not None
+
+    # VOICE CALL: BEGIN parses to kind "connect"
+    assert machine.handle_urc("connect")[0].to_state == CallState.ACTIVE
+    assert machine.session.answered_at is not None
+
+    # +CLCC: 1,0,0 arrives right after; must not disturb an active call
+    assert machine.handle_clcc("0", "15331986287") == []
+    assert machine.session.state == CallState.ACTIVE
+
+    # +COLP confirms the connected number
+    machine.handle_urc("colp", "15331986287")
+    assert machine.session.remote == "15331986287"
+
+    # +CLCC: 1,0,6 -> released by the far end
+    machine.handle_clcc("6", "15331986287")
+    assert machine.session.state == CallState.ENDED
+    assert machine.session.end_reason == EndReason.REMOTE_HANGUP
+
+    # VOICE CALL: END and NO CARRIER follow; the session is already terminal
+    assert machine.handle_urc("cend") == []
+    assert machine.handle_urc("no_carrier") == []
+    assert machine.session.end_reason == EndReason.REMOTE_HANGUP
+    assert machine.session.ended_at is not None
