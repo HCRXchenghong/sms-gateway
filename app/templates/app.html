@@ -8,7 +8,14 @@
             <button class="nav-item active" data-tab="overview">概览</button>
             <button class="nav-item" data-tab="send">发送</button>
             <button class="nav-item" data-tab="messages">消息</button>
+            <button class="nav-item" data-tab="dial">拨号</button>
+            <button class="nav-item" data-tab="calls">通话记录</button>
+            <button class="nav-item" data-tab="audio">声卡与提示音</button>
+            <button class="nav-item" data-tab="ai">AI 语音</button>
             <button class="nav-item" data-tab="keys">API</button>
+            {% if user.is_admin %}
+            <button class="nav-item" data-tab="accounts">账号管理</button>
+            {% endif %}
         </nav>
         <div class="session">
             <span>{{ user.username }}</span>
@@ -101,6 +108,221 @@
                 </table>
             </div>
         </section>
+        <section id="tab-dial" class="view">
+            <div class="two-col">
+                <div class="panel">
+                    <h2>拨号</h2>
+                    <label>拨出设备
+                        <select id="dial-device"></select>
+                    </label>
+                    <label>号码
+                        <input type="text" id="dial-number" placeholder="+8613800138000" maxlength="24" autocomplete="off">
+                    </label>
+                    <div class="dialpad" id="dialpad">
+                        <button type="button" class="dialpad-key" data-key="1">1<span></span></button>
+                        <button type="button" class="dialpad-key" data-key="2">2<span>ABC</span></button>
+                        <button type="button" class="dialpad-key" data-key="3">3<span>DEF</span></button>
+                        <button type="button" class="dialpad-key" data-key="4">4<span>GHI</span></button>
+                        <button type="button" class="dialpad-key" data-key="5">5<span>JKL</span></button>
+                        <button type="button" class="dialpad-key" data-key="6">6<span>MNO</span></button>
+                        <button type="button" class="dialpad-key" data-key="7">7<span>PQRS</span></button>
+                        <button type="button" class="dialpad-key" data-key="8">8<span>TUV</span></button>
+                        <button type="button" class="dialpad-key" data-key="9">9<span>WXYZ</span></button>
+                        <button type="button" class="dialpad-key" data-key="*">*<span></span></button>
+                        <button type="button" class="dialpad-key" data-key="0">0<span>+</span></button>
+                        <button type="button" class="dialpad-key" data-key="#">#<span></span></button>
+                    </div>
+                    <div class="form-row">
+                        <button type="button" class="button" id="dial-backspace">退格</button>
+                        <button type="button" class="button primary" id="dial-call">拨打电话</button>
+                    </div>
+                    <div id="dial-status" class="alert info" style="display:none;"></div>
+                    <p class="hint">拨号走 AT 串口下发 <code>ATD号码;</code>，音频走模块的 USB 声卡。对方接通后可以播报 TTS 或发送 DTMF。</p>
+                </div>
+
+                <div class="panel">
+                    <div class="section-head">
+                        <h2>当前通话</h2>
+                        <span class="hint" id="call-concurrency"></span>
+                    </div>
+                    <div id="active-calls" class="empty-state">当前没有通话</div>
+
+                    <h3>模拟测试</h3>
+                    <p class="hint">仅在 Mock 模式下可用，用于在没有硬件时联调来电与失败分支。</p>
+                    <div class="form-row">
+                        <input type="text" id="mock-caller" placeholder="主叫号码" value="+8613700001234" maxlength="24">
+                        <button type="button" class="button" id="mock-incoming-call">模拟来电</button>
+                        <button type="button" class="button" id="mock-incoming-sms">模拟来信</button>
+                    </div>
+                    <div class="form-row">
+                        <select id="mock-scenario">
+                            <option value="answer">接通 (answer)</option>
+                            <option value="busy">对方忙 (busy)</option>
+                            <option value="no_answer">无应答 (no_answer)</option>
+                            <option value="no_carrier">未接通 (no_carrier)</option>
+                            <option value="hang_forever">一直通话 (hang_forever)</option>
+                        </select>
+                        <button type="button" class="button" id="mock-set-scenario">设置下次拨号结果</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="tab-calls" class="view">
+            <div class="panel">
+                <div class="section-head">
+                    <div>
+                        <h2>通话统计</h2>
+                        <span class="hint">默认统计最近 7 天。</span>
+                    </div>
+                    <button type="button" class="button" id="refresh-call-stats">刷新</button>
+                </div>
+                <div id="call-stats" class="stat-grid"></div>
+            </div>
+            <div class="panel">
+                <div class="section-head">
+                    <div>
+                        <h2>通话记录</h2>
+                        <span class="hint">每通电话结束后自动写入话单，包含时长与结束原因。</span>
+                    </div>
+                    <div class="form-row">
+                        <select id="call-direction-filter">
+                            <option value="">全部方向</option>
+                            <option value="outbound">去电</option>
+                            <option value="inbound">来电</option>
+                        </select>
+                        <select id="call-device-filter"></select>
+                    </div>
+                </div>
+                <table class="msglist" id="calls-table">
+                    <thead><tr><th>时间</th><th>设备</th><th>方向</th><th>对方号码</th><th>状态</th><th>结束原因</th><th>时长</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="tab-audio" class="view">
+            <div class="two-col">
+                <div class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>声卡</h2>
+                            <span class="hint">服务器上的输入输出设备。切换后立即生效并持久化。</span>
+                        </div>
+                        <button type="button" class="button" id="refresh-audio">重新枚举</button>
+                    </div>
+                    <div class="form-row">
+                        <span class="mini-label">音频后端</span>
+                        <span id="audio-backend" class="chip ok">-</span>
+                    </div>
+                    <label>输出声卡
+                        <select id="audio-output"></select>
+                    </label>
+                    <label>输入声卡
+                        <select id="audio-input"></select>
+                    </label>
+                    <label>提示音音量 <span id="audio-volume-label">80%</span>
+                        <input type="range" id="audio-volume" min="0" max="100" step="5" value="80">
+                    </label>
+                    <div id="audio-status" class="alert info" style="display:none;"></div>
+                    <p class="hint">模块通话音频通过 <code>AT+CSDVC</code> 切到 USB 通道后，才会出现在这里的输入输出列表中。热插拔 USB 声卡后点「重新枚举」。</p>
+                </div>
+
+                <div class="panel">
+                    <h2>提示音</h2>
+                    <p class="hint">通话状态机在对应时刻自动播放，也可以在这里试听。文案可通过 AI 云端 TTS 合成为语音版本。</p>
+                    <table class="msglist" id="prompts-table">
+                        <thead><tr><th>标识</th><th>文案</th><th>类型</th><th>操作</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <section id="tab-ai" class="view">
+            <div class="two-col">
+                <div class="panel">
+                    <div class="section-head">
+                        <div>
+                            <h2>AI 通道配置</h2>
+                            <span class="hint">保存后热加载，无需重启服务。</span>
+                        </div>
+                        <button type="button" class="button" id="refresh-ai">刷新</button>
+                    </div>
+                    <div class="form-row">
+                        <span class="mini-label">当前对话供应商</span>
+                        <span id="ai-provider" class="chip warn">-</span>
+                        <span class="mini-label">TTS 引擎</span>
+                        <span id="ai-tts-engine" class="chip ok">-</span>
+                    </div>
+                    <form id="ai-settings-form" class="clean-form"></form>
+                    <div class="form-row">
+                        <span id="ai-status" class="hint"></span>
+                        <button type="submit" form="ai-settings-form" class="primary" id="save-ai-settings">保存配置</button>
+                    </div>
+                    <p class="hint">API Key 留空表示不修改。选择 <code>module</code> 引擎时，文字转语音直接用模块内置的 <code>AT+CTTS</code>，不需要云端 Key。</p>
+                </div>
+
+                <div class="panel">
+                    <h2>联调测试</h2>
+                    <label>对话测试
+                        <textarea id="ai-chat-input" rows="3" placeholder="输入一句话测试 Chat 接口">你好，请用一句话介绍自己。</textarea>
+                    </label>
+                    <div class="form-row">
+                        <span id="ai-chat-status" class="hint"></span>
+                        <button type="button" class="button" id="ai-chat-send">发送对话</button>
+                    </div>
+                    <div id="ai-chat-result" class="alert info" style="display:none;"></div>
+
+                    <label>语音合成测试
+                        <input type="text" id="ai-tts-input" value="欢迎使用语音短信网关" maxlength="200">
+                    </label>
+                    <div class="form-row">
+                        <button type="button" class="button" id="ai-tts-run">云端 TTS 合成</button>
+                        <button type="button" class="button" id="ai-tts-to-prompt">合成并替换提示音</button>
+                    </div>
+                    <audio id="ai-tts-audio" controls style="display:none;width:100%;"></audio>
+
+                    <label>通话内播报
+                        <input type="text" id="ai-call-tts-input" value="您好，这里是自动语音通知。" maxlength="200">
+                    </label>
+                    <div class="form-row">
+                        <select id="ai-call-device"></select>
+                        <button type="button" class="button" id="ai-call-speak">AI 生成并播报到通话</button>
+                    </div>
+                    <div id="ai-health" class="alert info" style="display:none;"></div>
+                </div>
+            </div>
+        </section>
+
+        {% if user.is_admin %}
+        <section id="tab-accounts" class="view">
+            <div class="panel">
+                <div class="section-head">
+                    <div>
+                        <h2>账号管理</h2>
+                        <span class="hint">App 与网页后台共用同一套账号。停用后该账号的所有会话立即失效。</span>
+                    </div>
+                    <button type="button" class="button primary" id="open-user-modal">新建账号</button>
+                </div>
+                <div id="account-status" class="alert info" style="display:none;"></div>
+                <table class="msglist" id="users-table">
+                    <thead><tr><th>登录名</th><th>显示名</th><th>角色</th><th>双因子</th><th>最近登录</th><th>状态</th><th>操作</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+
+            <div class="panel">
+                <h2>审计日志</h2>
+                <p class="hint">账号变更、配置修改、Key 操作与设备扫描都会记录在这里。</p>
+                <table class="msglist" id="audit-table">
+                    <thead><tr><th>时间</th><th>主体</th><th>操作</th><th>对象</th><th>来源 IP</th><th>结果</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+        {% endif %}
+
     </main>
 </div>
 
@@ -158,7 +380,63 @@
         </div>
     </div>
 </div>
+<div class="modal-backdrop" id="user-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="user-modal-title">
+        <div class="modal-head">
+            <div>
+                <h2 id="user-modal-title">新建账号</h2>
+                <p class="muted">坐席可以收发短信与拨号，管理员还能管理账号与配置。</p>
+            </div>
+            <button type="button" class="icon-button" id="close-user-modal" aria-label="关闭">×</button>
+        </div>
+        <form id="user-create-form" class="key-form key-modal-form">
+            <label>登录名
+                <input type="text" name="username" required maxlength="64" autocomplete="off" placeholder="例如：operator02">
+            </label>
+            <label>显示名
+                <input type="text" name="display_name" maxlength="64" placeholder="例如：前台小李">
+            </label>
+            <label>初始密码
+                <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password">
+            </label>
+            <label>角色
+                <select name="role">
+                    <option value="operator">坐席</option>
+                    <option value="admin">管理员</option>
+                </select>
+            </label>
+            <div id="user-form-error" class="alert error" style="display:none;"></div>
+            <div class="key-submit">
+                <button class="primary" type="submit">创建</button>
+                <button id="user-cancel" type="button">取消</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal-backdrop" id="password-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="password-modal-title">
+        <div class="modal-head">
+            <div>
+                <h2 id="password-modal-title">重置密码</h2>
+                <p class="muted" id="password-modal-subtitle"></p>
+            </div>
+            <button type="button" class="icon-button" id="close-password-modal" aria-label="关闭">×</button>
+        </div>
+        <form id="password-reset-form" class="key-form key-modal-form">
+            <label>新密码
+                <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password">
+            </label>
+            <div class="key-submit">
+                <button class="primary" type="submit">重置</button>
+                <button id="password-cancel" type="button">取消</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 {% endblock %}
 {% block scripts %}
 <script src="/static/app.js"></script>
+<script src="/static/app_console.js"></script>
 {% endblock %}

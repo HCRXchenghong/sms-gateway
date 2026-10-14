@@ -153,6 +153,27 @@ class ApiClient {
     return resp.bodyBytes;
   }
 
+  /// POST that returns the raw body. /app/ai/tts answers with audio/wav, so a
+  /// JSON decoding wrapper would corrupt it.
+  Future<List<int>> postBytes(String path, Object body) async {
+    final resp = await _http.post(Uri.parse(_url(path)),
+        headers: _headers(), body: jsonEncode(body));
+    if (resp.statusCode == 401 || resp.statusCode == 403) onUnauthorized?.call();
+    if (resp.statusCode >= 400) {
+      throw ApiException(resp.statusCode, _errorMessage(_tryJson(resp.body)));
+    }
+    return resp.bodyBytes;
+  }
+
+  dynamic _tryJson(String body) {
+    if (body.isEmpty) return null;
+    try {
+      return jsonDecode(body);
+    } on FormatException {
+      return body;
+    }
+  }
+
   // ---------------------------------------------------------------- auth
 
   Future<LoginResult> login({
@@ -389,14 +410,24 @@ class ApiClient {
     return ChatReply.fromJson(data);
   }
 
-  Future<String> tts(String text, {String? voice}) async {
-    final data = await post('/app/ai/tts', body: {'text': text, if (voice != null) 'voice': voice});
-    if (data is Map && data['audio_base64'] != null) return data['audio_base64'].toString();
-    return '';
-  }
+  /// Cloud TTS. Returns WAV bytes; an empty list means the gateway is
+  /// configured to synthesise on the module instead.
+  Future<List<int>> tts(String text, {String? voice}) => postBytes('/app/ai/tts',
+      {'text': text, if (voice != null) 'voice': voice});
 
-  Future<dynamic> aiSpeakInCall(int deviceId, String text, {bool speak = true}) =>
-      post('/app/voice/' + deviceId.toString() + '/ai/speak', body: {'text': text, 'speak': speak});
+  /// Render a prompt tone with the AI voice. Admin only.
+  Future<dynamic> renderPromptWithAi(String promptId) =>
+      post('/app/ai/tts/prompt/' + promptId);
+
+  /// Ask the model then play the answer to the far end.
+  /// engine=module uses the A7670 built in AT+CTTS synthesiser, engine=audio
+  /// renders cloud TTS and plays it through the sound card bound to the module.
+  Future<Map<String, dynamic>> aiSpeakInCall(int deviceId, String text,
+          {String engine = 'module'}) async {
+    final data = await post('/app/voice/' + deviceId.toString() + '/ai/speak',
+        body: {'text': text, 'engine': engine}) as Map<String, dynamic>;
+    return data;
+  }
 
   // -------------------------------------------------------------- admin
 

@@ -380,8 +380,40 @@ Future<void> main(List<String> argv) async {
     _expect(reply.reply.isNotEmpty, '回复长度 ' + reply.reply.length.toString());
   });
   await _check('POST /app/ai/tts 文字转语音', () async {
-    final audio64 = await api.tts('联调语音合成测试');
-    _ok('TTS 返回 ' + (audio64.isEmpty ? '空音频（模块内置合成走 AT+CTTS）' : audio64.length.toString() + ' 字节 base64'));
+    final bytes = await api.tts('联调语音合成测试');
+    _expect(bytes.isNotEmpty, 'TTS 返回 ' + bytes.length.toString() + ' 字节');
+    // A WAV starts with the RIFF magic; anything else means the gateway handed
+    // back an error page that the client would have tried to play as audio.
+    final magic = String.fromCharCodes(bytes.take(4));
+    _expect(magic == 'RIFF', '响应是 WAV 音频', magic);
+  });
+
+  await _check('POST /app/voice/{id}/ai/speak 通话内 AI 播报', () async {
+    // 'answer' connects and then holds the call up until we hang up, which is
+    // what this check needs. 'hang_forever' parks the call in alerting and
+    // never emits CONNECT, so the call never becomes active.
+    await api.mockScenario(deviceId, 'answer');
+    final session = await api.dial(number: testNumber, deviceId: deviceId);
+    await _waitFor(() async {
+      final active = await api.activeCalls();
+      return active.any((c) => c.callId == session.callId && c.state == CallState.active);
+    }, label: 'AI 播报前接通');
+
+    final moduleRes =
+        await api.aiSpeakInCall(deviceId, '对方询问业务办理进度，请简短回复。');
+    _expect((moduleRes['reply'] ?? '').toString().isNotEmpty,
+        'module 引擎回复 ' + moduleRes['reply'].toString().substring(0, 20));
+    _expect(moduleRes['channel'] == 'module_tts', '走模块内置合成 ' + moduleRes['channel'].toString());
+
+    final audioRes = await api.aiSpeakInCall(deviceId, '请再确认一次。', engine: 'audio');
+    _expect(audioRes['channel'] == 'cloud_tts', '走云端 TTS ' + audioRes['channel'].toString());
+
+    await api.hangup(deviceId);
+    await _waitFor(() async {
+      final active = await api.activeCalls();
+      return !active.any((c) => c.callId == session.callId);
+    }, label: 'AI 播报后挂断');
+    _ok('AI 播报后已挂断');
   });
 
   // ---------------------------------------------------------- settings

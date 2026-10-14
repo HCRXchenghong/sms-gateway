@@ -368,3 +368,127 @@ code { background: var(--surface-soft); border-radius: 6px; padding: 2px 5px; }
     .scan-device-top { align-items: flex-start; flex-direction: column; }
     .modal-actions .button { flex: 1 1 140px; }
 }
+
+/* --- Voice / audio / AI / accounts console ----------------------------- */
+
+.dialpad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin: 12px 0 4px;
+}
+
+.dialpad-key {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-height: 58px;
+    font-size: 22px;
+    font-weight: 500;
+    line-height: 1;
+    border-radius: 50%;
+    aspect-ratio: 1.5;
+}
+
+.dialpad-key span {
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    font-weight: 400;
+    color: var(--muted, #6b7280);
+    min-height: 12px;
+}
+
+button.danger, .button.danger {
+    background: #fdecea;
+    border-color: #f4c8c3;
+    color: var(--error);
+}
+
+button.danger:hover, .button.danger:hover { background: #fbdcd8; }
+
+.call-card {
+    border: 1px solid var(--line, #e5e7eb);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    background: var(--surface-soft, #fafafa);
+}
+
+.call-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 16px;
+}
+
+.call-card-meta {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--muted, #6b7280);
+}
+
+.call-tts-log {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-left: 3px solid var(--accent, #2f6bff);
+    background: #fff;
+    border-radius: 0 8px 8px 0;
+    font-size: 12px;
+    color: var(--muted, #6b7280);
+}
+
+.call-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px;
+    margin-top: 6px;
+}
+
+.stat-cell {
+    border: 1px solid var(--line, #e5e7eb);
+    border-radius: 12px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: #fff;
+}
+
+.stat-value { font-size: 22px; font-weight: 600; line-height: 1.1; }
+.stat-label { font-size: 12px; color: var(--muted, #6b7280); }
+
+.row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+}
+
+.row-actions .button { padding: 4px 9px; font-size: 12px; }
+
+#ai-settings-form label { display: block; margin-bottom: 12px; }
+#ai-settings-form label.check { display: flex; align-items: center; gap: 8px; }
+#ai-settings-form input[type="text"],
+#ai-settings-form input[type="password"],
+#ai-settings-form select,
+#ai-settings-form textarea { width: 100%; }
+
+#ai-tts-audio { margin-top: 10px; }
+
+@media (max-width: 860px) {
+    .dialpad { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .dialpad-key { min-height: 50px; font-size: 19px; }
+    .row-actions { justify-content: flex-start; }
+    .stat-grid { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+}
+
