@@ -12,6 +12,7 @@ from typing import Callable
 from .. import repo_admin
 from ..config import settings
 from . import prompts as prompt_registry
+from .capture import CaptureHub, WavWriter
 from .devices import (
     AudioDeviceInfo,
     detect_backend,
@@ -62,9 +63,13 @@ class PlayResult:
 class RecordingHandle:
     path: Path
     argv: List[str]
-    process: asyncio.subprocess.Process
+    # None when the capture comes from the shared hub instead of a process this
+    # player owns.
+    process: Optional[asyncio.subprocess.Process] = None
     device: Optional[str] = None
     started_at: float = 0.0
+    capture_name: Optional[str] = None
+    writer: Optional[WavWriter] = None
 
 
 class AudioPlayer:
@@ -79,9 +84,19 @@ class AudioPlayer:
         self._playing: Dict[str, asyncio.subprocess.Process] = {}
         self._recordings: List[RecordingHandle] = []
         self._loaded = False
+        # Attached by main.py so capture is shared with live recognition
+        # instead of opening a second reader on the same card.
+        self._capture: Optional[CaptureHub] = None
         # Runtime gate for capture. main.py swaps in the admin setting so the
         # console toggle takes effect without restarting the gateway.
         self.record_enabled: Callable[[], bool] = lambda: bool(settings.audio_record_enabled)
+
+    def attach_capture(self, hub: Optional[CaptureHub]) -> None:
+        self._capture = hub
+
+    @property
+    def capture(self) -> Optional[CaptureHub]:
+        return self._capture
 
     # -- setup ----------------------------------------------------------
 
@@ -302,6 +317,8 @@ class AudioPlayer:
         await self.stop()
         for handle in list(self._recordings):
             await self.stop_recording(handle)
+        if self._capture is not None:
+            await self._capture.stop_all()
 
     # -- capture --------------------------------------------------------
 
@@ -340,6 +357,8 @@ class AudioPlayer:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         use_device = device if device is not None else self._input_device
+        if self._capture is not None:
+            return await self._start_shared_recording(target, use_device)
         argv = self._record_argv(target, use_device)
         if not argv:
             log.warning("no capture tool available")
@@ -357,7 +376,40 @@ class AudioPlayer:
         self._recordings.append(handle)
         return handle
 
+    async def _start_shared_recording(self, target: Path, device: Optional[str]) -> Optional[RecordingHandle]:
+        """Record through the shared capture so recognition can listen too."""
+        import time
+
+        rate = int(settings.audio_sample_rate)
+        try:
+            writer = WavWriter(target, rate=rate)
+        except OSError as e:
+            log.warning("failed to open the recording file %s: %s", target, e)
+            return None
+        name = "record:" + target.stem
+        ok = await self._capture.subscribe(  # type: ignore[union-attr]
+            name, on_frames=writer.write, device=device, rate=rate
+        )
+        if not ok:
+            writer.close()
+            log.warning("no capture device answered for %s", target)
+            return None
+        handle = RecordingHandle(
+            path=target, argv=[], process=None, device=device,
+            started_at=time.time(), capture_name=name, writer=writer,
+        )
+        self._recordings.append(handle)
+        return handle
+
     async def stop_recording(self, handle: RecordingHandle) -> Path:
+        if handle.process is None:
+            if handle.capture_name and self._capture is not None:
+                await self._capture.release(handle.capture_name)
+            if handle.writer is not None:
+                handle.writer.close()
+            if handle in self._recordings:
+                self._recordings.remove(handle)
+            return handle.path
         if handle.process.returncode is None:
             handle.process.terminate()
             try:

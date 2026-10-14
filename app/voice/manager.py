@@ -332,10 +332,13 @@ class CallManager:
                 "include the on-module TTS voice bank; synthesise in the cloud "
                 "and play it through the sound card instead (engine=audio)."
             ) from e
-        async with self._lock:
-            machine = self._sessions.get(int(device_id))
-            if machine:
-                machine.session.tts_log.append({"text": text, "mode": engine_mode, "at": int(time.time())})
+        # No lock here on purpose. speak() is reached from the prompt hook,
+        # which runs while _apply() holds this same lock for the recording
+        # announcement, so taking it again would hang the call manager. The
+        # log append needs no protection: one event loop, one list.
+        machine = self._sessions.get(int(device_id))
+        if machine:
+            machine.session.tts_log.append({"text": text, "mode": engine_mode, "at": int(time.time())})
         await self._emit("call.tts", {"device_id": int(device_id), "text": text, "mode": engine_mode})
 
     async def stop_speak(self, device_id: int) -> None:

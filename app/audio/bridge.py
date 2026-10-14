@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, List, Optional
 
 from ..config import settings
+from .capture import capture_argv
 from .vad import UtteranceSegmenter, VadConfig
 
 log = logging.getLogger(__name__)
@@ -66,23 +66,6 @@ class BridgeStats:
         return out
 
 
-def capture_argv(rate: int, device: Optional[str], backend: str = "alsa") -> List[str]:
-    """The command that streams raw mono S16LE PCM to stdout."""
-    if shutil.which("arecord"):
-        argv = ["arecord", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(rate), "-c", "1"]
-        if device:
-            argv += ["-D", device]
-        argv.append("/dev/stdout")
-        return argv
-    if shutil.which("parecord"):
-        argv = ["parecord", "--format=s16le", f"--rate={rate}", "--channels=1"]
-        if device:
-            argv += ["-d", device]
-        argv.append("/dev/stdout")
-        return argv
-    return []
-
-
 @dataclass
 class CallAudioBridge:
     call_id: str
@@ -93,6 +76,10 @@ class CallAudioBridge:
     player: Any = None
     # Extra quiet time after playback ends before capture is trusted again.
     echo_tail_seconds: float = 0.25
+    # Shared capture hub. When present the bridge subscribes to the one
+    # arecord process that also feeds the call recording instead of opening a
+    # second reader on a card that only answers one at a time.
+    capture: Any = None
 
     def __post_init__(self) -> None:
         self._segmenter = UtteranceSegmenter(self.vad)
@@ -102,6 +89,7 @@ class CallAudioBridge:
         self._gate_until: float = 0.0
         self._lock = asyncio.Lock()
         self._stopped = False
+        self._subscriber: Optional[str] = None
 
     @property
     def stats(self) -> BridgeStats:
@@ -114,6 +102,16 @@ class CallAudioBridge:
     def gated(self) -> bool:
         return time.monotonic() < self._gate_until
 
+    def reset_capture(self) -> None:
+        """Drop the partial utterance the segmenter is holding.
+
+        Called after we finish speaking into the call. The gate keeps our own
+        audio out of the recogniser, but the frames that arrived right at the
+        edge are already in the buffer, and emitting them would hand the
+        recogniser a fragment of our own voice.
+        """
+        self._segmenter.reset()
+
     # -- capture --------------------------------------------------------
 
     async def start(self) -> bool:
@@ -121,6 +119,25 @@ class CallAudioBridge:
         if self._stats.running:
             return True
         rate = int(self.vad.sample_rate or settings.audio_sample_rate)
+        if self.capture is not None:
+            name = f"bridge:{self.call_id}"
+            ok = await self.capture.subscribe(
+                name,
+                on_frames=self.push_frames,
+                on_stop=self._capture_stopped,
+                device=self.input_device,
+                rate=rate,
+            )
+            if not ok:
+                self._stats.capture_error = "没有可用的采集设备"
+                log.warning("shared capture unavailable for call %s", self.call_id)
+                return False
+            self._subscriber = name
+            self._stopped = False
+            self._stats.running = True
+            self._stats.started_at = time.time()
+            log.info("audio bridge joined the shared capture for call %s", self.call_id)
+            return True
         argv = capture_argv(rate, self.input_device)
         if not argv:
             self._stats.capture_error = "没有可用的采集工具（arecord/parecord）"
@@ -142,6 +159,14 @@ class CallAudioBridge:
         self._reader = asyncio.create_task(self._read_loop(), name=f"audio-bridge-{self.call_id}")
         log.info("audio bridge capture started for call %s (%s)", self.call_id, " ".join(argv))
         return True
+
+    def _capture_stopped(self, error: Optional[str]) -> None:
+        """The shared capture died or was closed by its last other consumer."""
+        self._stats.running = False
+        self._subscriber = None
+        if error:
+            self._stats.capture_error = str(error)[:300]
+            log.warning("shared capture stopped for call %s: %s", self.call_id, error)
 
     async def _read_loop(self) -> None:
         assert self._process is not None and self._process.stdout is not None
@@ -234,6 +259,16 @@ class CallAudioBridge:
 
     async def stop(self) -> None:
         self._stopped = True
+        if self.capture is not None and self._subscriber:
+            name, self._subscriber = self._subscriber, None
+            await self.capture.release(name)
+            self._stats.running = False
+            tail = self._segmenter.flush()
+            if tail:
+                self._stats.utterances += 1
+                await self._safe_dispatch(tail, len(tail) / float(
+                    max(1, self.vad.sample_rate * self.vad.sample_width)))
+            return
         if self._reader is not None:
             self._reader.cancel()
             try:

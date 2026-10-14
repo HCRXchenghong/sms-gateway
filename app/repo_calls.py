@@ -157,8 +157,13 @@ def update_call(
         c.execute(f"UPDATE call_sessions SET {', '.join(fields)} WHERE call_id = ?", params)
 
 
-def persist_session(session: CallSession) -> None:
-    """Upsert a whole session. Used when the call ends."""
+def persist_session(session: CallSession, *, keep_transcript: bool = True) -> None:
+    """Upsert a whole session. Used when a call opens and again when it ends.
+
+    keep_transcript is the transcript.save switch. Writing an empty list rather
+    than skipping the column matters: a call transcribed before the switch was
+    turned off must not leave the old words behind in the row.
+    """
     with connection() as c:
         exists = c.execute("SELECT id FROM call_sessions WHERE call_id = ?", (session.call_id,)).fetchone()
     if not exists:
@@ -173,7 +178,7 @@ def persist_session(session: CallSession) -> None:
         end_reason=session.end_reason.value if session.end_reason else None,
         duration=session.duration,
         tts_log=session.tts_log,
-        transcript=session.transcript,
+        transcript=session.transcript if keep_transcript else [],
         recording_path=session.recording_path,
     )
 

@@ -170,9 +170,16 @@ class Settings(BaseSettings):
     inbound_mode: str = "manual"
     inbound_auto_answer_delay_seconds: float = 3.0
     inbound_ai_max_seconds: int = 300
+    # What the AI is supposed to achieve when it picks the phone up itself.
+    # Empty falls back to a built-in purpose: identify the caller, find out
+    # what they want, promise a call back.
+    inbound_ai_purpose: str = ""
+    inbound_ai_opener: str = ""
     # Outbound AI tasks hang up once the stated purpose is met, and never run
     # longer than this even if the conversation is still going.
     ai_call_max_seconds: int = 600
+    # Extra instructions for the minutes. Empty uses the built-in template.
+    summary_template: str = ""
 
     @property
     def db_path(self) -> Path:

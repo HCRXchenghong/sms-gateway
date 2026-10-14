@@ -297,9 +297,7 @@ class CallAgent:
             return None
         self._history.append({"role": "peer", "content": text, "at": int(time.time())})
         if self.elapsed() >= self.max_seconds:
-            await self._say("不好意思，时间关系我先不打扰您了，再见。", role="assistant")
-            await self._finish(OUTCOME_TIMEOUT, achieved=None, evidence="",
-                               result="超过最长通话时间")
+            await self.time_out()
             return self._last_action
         action = await self._decide(text)
         self._last_action = action
@@ -317,6 +315,20 @@ class CallAgent:
         if self._finished:
             return
         await self._finish(OUTCOME_CANCELLED, achieved=None, evidence="", result="任务被取消")
+
+    async def time_out(self) -> None:
+        """The clock ran out while the far end was still silent or talking.
+
+        Same shape as every other ending: the farewell is played into the call
+        first, and only then does the hangup run, so the last word is not cut
+        off. A watchdog calls this from outside the conversation loop, which is
+        why it is public.
+        """
+        if self._finished or self._handover:
+            return
+        await self._say("不好意思，时间关系我先不打扰您了，再见。", role="assistant")
+        await self._finish(OUTCOME_TIMEOUT, achieved=None, evidence="",
+                           result="超过最长通话时间")
 
     async def fail(self, detail: str) -> None:
         if self._finished:

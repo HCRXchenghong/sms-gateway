@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from . import db, repo, repo_admin, repo_calls, repo_threads
 from .ai.engine import AIError, ai_engine
 from .audio import prompts as prompt_registry
+from .audio.capture import capture_hub
 from .audio.player import audio_player
 from .config import settings
 from .hub import hub
@@ -26,8 +27,10 @@ from .routes_api import router as api_router
 from .routes_app import router as app_router
 from .routes_admin import router as admin_router
 from .routes_ai import router as ai_router
+from .routes_callflow import router as callflow_router
 from .routes_voice import router as voice_router
 from .routes_web import router as web_router
+from .voice.callflow import CallFlow
 from .voice.manager import CallManager, VoiceError
 from .voice.recorder import CallRecorder
 from .voice.state import CallSession
@@ -125,7 +128,8 @@ async def _retention_loop() -> None:
 
 async def _write_cdr(session: CallSession, phase: str) -> None:
     """Persist a call row when it opens and again when it closes."""
-    await asyncio.to_thread(repo_calls.persist_session, session)
+    keep_transcript = _flag_from_settings("transcript.save", settings.transcript_save)
+    await asyncio.to_thread(repo_calls.persist_session, session, keep_transcript=keep_transcript)
 
 
 @asynccontextmanager
@@ -157,6 +161,11 @@ async def lifespan(app: FastAPI):
                     str(rec_path),
                     200,
                 )
+
+        # Translation, the call agent and the minutes all hang off the same
+        # transitions. The hook only schedules work, so it is safe to call
+        # here while the call manager holds its own lock.
+        await flow.on_state(device_id, state, session_dict)
 
         if not prompt_id:
             return
@@ -281,6 +290,20 @@ async def lifespan(app: FastAPI):
     audio_player.record_enabled = lambda: _flag_from_settings(
         "audio.record_enabled", settings.audio_record_enabled
     )
+    # Recording and live recognition read the same card. Sharing one capture
+    # process keeps a recording from failing with "device busy" the moment
+    # translation or the call agent starts listening.
+    audio_player.attach_capture(capture_hub)
+
+    flow = CallFlow(
+        calls=calls,
+        engine=ai_engine,
+        publish=hub.publish,
+        speak_into_call=_speak_into_call,
+        player=audio_player,
+        capture=capture_hub,
+        modems=modems,
+    )
 
     try:
         await audio_player.load()
@@ -298,8 +321,11 @@ async def lifespan(app: FastAPI):
     app.state.recorder = recorder
     app.state.audio = audio_player
     app.state.ai = ai_engine
+    app.state.flow = flow
+    app.state.capture = capture_hub
     task = asyncio.create_task(modems.run(), name="modem-manager")
     await calls.start()
+    await flow.start()
     retention_task = asyncio.create_task(_retention_loop(), name="message-retention")
     log.info(
         "gateway started (mock=%s voice=%s audio=%s)",
@@ -310,6 +336,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await flow.stop()
         await calls.stop()
         await recorder.stop_all()
         await audio_player.stop_all()
@@ -345,3 +372,4 @@ app.include_router(voice_router)
 app.include_router(admin_router)
 app.include_router(app_router)
 app.include_router(ai_router)
+app.include_router(callflow_router)

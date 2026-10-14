@@ -64,6 +64,9 @@ EDITABLE_SETTINGS = {
     "inbound.mode": str,
     "inbound.auto_answer_delay_seconds": float,
     "inbound.ai_max_seconds": int,
+    "inbound.ai_purpose": str,
+    "inbound.ai_opener": str,
+    "summary.template": str,
 }
 
 SECRET_SETTINGS = {

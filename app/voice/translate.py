@@ -292,6 +292,21 @@ class CallTranslator:
             return None
         return await self.my_text(chunk, partial=True)
 
+    async def say_to_peer(self, text: str) -> Optional[TranslationResult]:
+        """Operator text that has to reach the far end whatever the mode is.
+
+        Subtitle mode shows translations without speaking them, but an operator
+        who typed or dictated a sentence expects it to be said. This forces the
+        voice path for one utterance and leaves the configured mode alone, so a
+        call running in subtitle mode stays in subtitle mode afterwards.
+        """
+        previous = self.mode
+        self.mode = MODE_VOICE
+        try:
+            return await self.my_text(text)
+        finally:
+            self.mode = previous
+
     async def flush(self, speaker: str = "peer") -> Optional[TranslationResult]:
         """End of utterance: translate whatever the accumulator still holds."""
         chunk = self._accumulators.get(speaker, StreamAccumulator()).flush()

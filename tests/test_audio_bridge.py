@@ -233,3 +233,70 @@ def test_stats_are_serialisable():
     payload = stats.to_dict()
     assert payload["call_id"] == "c1" and payload["running"] is False
     assert "seconds" not in payload
+
+
+# -- shared capture ----------------------------------------------------------
+
+
+def test_two_consumers_share_one_capture_process():
+    """Recording and recognition must not fight over the card.
+
+    A real subprocess stands in for arecord so the fan-out, the reference
+    counting and the teardown are all exercised rather than assumed.
+    """
+    from app.audio.capture import CaptureHub
+
+    started: list[int] = []
+
+    def builder(rate, device):
+        started.append(rate)
+        return ["/bin/sh", "-c", "while :; do head -c 640 /dev/zero; sleep 0.02; done"]
+
+    hub = CaptureHub(argv_builder=builder)
+    got = {"recorder": 0, "bridge": 0}
+
+    async def scenario():
+        assert await hub.subscribe("recorder", rate=16000,
+                                   on_frames=lambda d: got.__setitem__("recorder", got["recorder"] + len(d)))
+        assert await hub.subscribe("bridge", rate=16000,
+                                   on_frames=lambda d: got.__setitem__("bridge", got["bridge"] + len(d)))
+        await wait_for_capture(lambda: got["recorder"] >= 640 and got["bridge"] >= 640)
+        assert started == [16000], "one card, one capture process"
+        stats = hub.stats()
+        assert len(stats) == 1
+        assert stats[0]["subscribers"] == ["bridge", "recorder"]
+
+        await hub.release("recorder")
+        stats = hub.stats()
+        assert stats and stats[0]["subscribers"] == ["bridge"], "the stream stays up for the other consumer"
+        await hub.release("bridge")
+        assert hub.stats() == [], "the last consumer closing stops the capture"
+
+    run(scenario())
+
+
+def test_a_capture_that_dies_tells_its_subscribers():
+    from app.audio.capture import CaptureHub
+
+    stops: list = []
+    hub = CaptureHub(argv_builder=lambda rate, device: ["/bin/sh", "-c", "head -c 320 /dev/zero"])
+
+    async def scenario():
+        assert await hub.subscribe("bridge", rate=8000, on_frames=lambda d: None,
+                                   on_stop=lambda error: stops.append(error))
+        await wait_for_capture(lambda: bool(stops))
+        assert hub.stats() == []
+
+    run(scenario())
+    assert stops and stops[0] is None, "a clean end of stream is not an error"
+
+
+async def wait_for_capture(predicate, timeout=5.0):
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("capture never delivered the expected frames")
