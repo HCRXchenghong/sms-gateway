@@ -280,6 +280,24 @@ class ModemManager:
                 self._tasks[device_id] = task
                 self._stable_to_device[cand.stable_key] = device_id
 
+            # Rows left behind by an earlier run keep status=online in the
+            # database forever: mock devices created while the gateway ran in
+            # preview mode, or a module whose worker died without reaching the
+            # reap path. A client that picks "first online device" then dials
+            # through hardware that is not there. Reconcile on every scan.
+            rows = await asyncio.to_thread(repo.list_devices)
+            for row in rows:
+                device_id = int(row["id"])
+                # list_devices hands back sqlite3.Row, which supports indexing
+                # but not .get().
+                if row["status"] == "online" and device_id not in self._modems:
+                    await asyncio.to_thread(
+                        repo.update_device_status,
+                        device_id,
+                        "offline",
+                        "no modem worker attached",
+                    )
+
     async def _reap_done(self) -> None:
         async with self._lock:
             done = [device_id for device_id, task in self._tasks.items() if task.done()]

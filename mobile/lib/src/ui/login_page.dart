@@ -20,7 +20,7 @@ class _LoginPageState extends State<LoginPage> {
 
   /// host[:port] with an optional scheme and path; spaces and stray text fail.
   static final RegExp _serverPattern =
-      RegExp(r'^(https?://)?[A-Za-z0-9._-]+(:d+)?(/[^s]*)?$');
+      RegExp(r'^(https?://)?[A-Za-z0-9._-]+(:\d+)?(/\S*)?$');
 
   late final TextEditingController _server;
   late final TextEditingController _username;

@@ -53,4 +53,27 @@ void main() {
 
     expect(find.text('地址格式不正确'), findsOneWidget);
   });
+
+  testWidgets('login page accepts a host with an explicit port', (tester) async {
+    // A gateway on a LAN address always carries a port. The validator regex once
+    // lost its backslashes ((:d+) instead of (:\d+)), which rejected every
+    // usable address on a real device while the widget test only covered the
+    // malformed case.
+    await tester.pumpWidget(
+      ChangeNotifierProvider<AppScope>(
+        create: (_) => AppScope(),
+        child: const MaterialApp(home: LoginPage()),
+      ),
+    );
+    await tester.pump();
+
+    await tester.enterText(
+        find.byType(TextFormField).at(0), 'http://192.168.31.110:8811');
+    await tester.enterText(find.byType(TextFormField).at(1), 'admin');
+    await tester.enterText(find.byType(TextFormField).at(2), 'secret');
+    await tester.tap(find.text('登录'));
+    await tester.pump();
+
+    expect(find.text('地址格式不正确'), findsNothing);
+  });
 }
