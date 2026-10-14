@@ -264,6 +264,9 @@ class MockModem:
     async def tts_supported(self) -> bool:
         return True
 
+    async def voice_capability(self) -> bool:
+        return True
+
     async def list_calls(self) -> List[dict]:
         if self._stat is None:
             return []

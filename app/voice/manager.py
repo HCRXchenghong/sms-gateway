@@ -8,6 +8,7 @@ import uuid
 from typing import Awaitable, Callable, Dict, List, Optional, Protocol
 
 from ..config import settings
+from ..modem import ModemError
 from .parser import VoiceUrc
 from .state import CallDirection, CallSession, CallState, CallStateMachine, EndReason, Transition
 
@@ -278,7 +279,12 @@ class CallManager:
         modem = self._get_modem(int(device_id))
         if modem is None or not modem.connected:
             raise VoiceError(f"device {device_id} is not online")
-        sent = await modem.send_dtmf(digits)
+        try:
+            sent = await modem.send_dtmf(digits)
+        except ModemError as e:
+            # Without this the serial level failure escapes as an unhandled
+            # exception and the API answers 500 instead of a usable 4xx.
+            raise VoiceError(f"module rejected the DTMF command: {e}") from e
         await self._emit(
             "call.dtmf",
             {"device_id": int(device_id), "digits": digits, "sent": sent},
@@ -291,7 +297,19 @@ class CallManager:
         if modem is None or not modem.connected:
             raise VoiceError(f"device {device_id} is not online")
         engine_mode = int(mode or settings.voice_tts_mode)
-        await modem.tts_speak(text, engine_mode)
+        try:
+            await modem.tts_speak(text, engine_mode)
+        except ModemError as e:
+            # Observed on an A7670G-LLSE running A7670M7_V1.11.1: AT+CTTS? and
+            # AT+CTTSPARAM? both answer, the audio path is open (+CSDVC: 1), yet
+            # every AT+CTTS=1,"<ucs2>" variant returns plain ERROR. That firmware
+            # ships without the TTS voice bank, so say what to do instead of
+            # surfacing a bare 500.
+            raise VoiceError(
+                f"module rejected the TTS command ({e}). This firmware may not "
+                "include the on-module TTS voice bank; synthesise in the cloud "
+                "and play it through the sound card instead (engine=audio)."
+            ) from e
         async with self._lock:
             machine = self._sessions.get(int(device_id))
             if machine:

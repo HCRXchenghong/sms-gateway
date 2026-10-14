@@ -611,14 +611,34 @@ class Modem:
             except ModemError as e:
                 log.info("AT+CTTS=0 unsupported or idle: %s", e)
 
+    async def voice_capability(self) -> bool:
+        """True when the module advertises GSM voice in its capabilities.
+
+        AT+GCAP answers '+GCAP: +CGSM,+FCLASS,+DS' on the A7670G; +CGSM is the
+        3GPP marker for a voice capable GSM terminal. This is unrelated to TTS,
+        which a module can lack while still placing calls perfectly well.
+        """
+        try:
+            async with self._lock:
+                lines = await self._cmd_unlocked("AT+GCAP", timeout=4)
+        except ModemError:
+            return False
+        return "+CGSM" in " ".join(lines).upper()
+
     async def tts_supported(self) -> bool:
         """Probe AT+CTTS=? so we do not send TTS to a firmware without it."""
         try:
             async with self._lock:
-                await self._cmd_unlocked("AT+CTTS=?", timeout=4)
-            return True
+                lines = await self._cmd_unlocked("AT+CTTS=?", timeout=4)
         except ModemError:
             return False
+        # A firmware that really carries the voice bank answers the test form
+        # with its parameter ranges, e.g. '+CTTS: (0-1),(0-255)'. The
+        # A7670G-LLSE build answers a bare OK: the command is parsed but
+        # synthesis is absent, and every AT+CTTS=1,"..." then fails with ERROR.
+        # Treating that OK as support made the gateway advertise on-module TTS
+        # it could never deliver.
+        return any(line.strip().startswith("+CTTS:") for line in lines)
 
     async def list_calls(self) -> List[dict]:
         """Return parsed AT+CLCC rows. Empty list means no call."""

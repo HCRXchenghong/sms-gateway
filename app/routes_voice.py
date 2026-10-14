@@ -381,7 +381,12 @@ async def device_signal(device_id: int, request: Request, user: CurrentUser = De
         # CSQ 0..31 maps roughly to -113..-51 dBm in 2 dB steps.
         "dbm": (-113 + 2 * rssi) if isinstance(rssi, int) and 0 <= rssi <= 31 else None,
         "registration": reg,
-        "voice_supported": await modem.tts_supported() if hasattr(modem, "tts_supported") else False,
+        # Voice calling and on-module TTS are independent capabilities. This used
+        # to report the TTS probe result as voice_supported, so a firmware
+        # without the voice bank looked unable to place calls even though it
+        # could, and vice versa.
+        "voice_supported": await modem.voice_capability() if hasattr(modem, "voice_capability") else False,
+        "tts_supported": await modem.tts_supported() if hasattr(modem, "tts_supported") else False,
     }
 
 
