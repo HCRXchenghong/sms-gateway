@@ -209,3 +209,27 @@ SMSGW_URL=http://127.0.0.1:8812 npm --prefix tests/web run test:sms
 - 切换脚本等响应返回后才结束手动进程并启动单元，端口不会同时被两个进程占用；关闭自启不影响正在运行的网关。
 - 测试：新增 6 项 pytest（systemd 探针全部伪造），全量 221 项通过。
 - 实测：开关两次后 systemctl is-enabled 随之变化；切换后 is-active=active、进程 PPID 为 1、模块连接正常。网关现由 systemd 管理，重启后由单元自动拉起。
+
+## 2026-10-15 录音控制界面与振铃期挂断同步
+
+### 本轮改动
+
+- 后端新增每通电话的录音控制：GET/POST /app/voice/calls/{id}/recording（开始或停止，可带 announce）、POST /app/voice/calls/{id}/recording/announce（中途告知对方）、GET /app/voice/calls/{id}（查询单通电话的最终状态）。三者都写审计；策略为强制或不录音时开关返回 409 并说明原因。/app/voice/state 现在带 recording 快照、recording_policy 以及每通电话的 recording 与 recording_detail。
+- 网页控制台：通话卡片显示「● 录音中」徽标与提示播放结果；可选策略下给出开始录音 / 录音并告知对方 / 停止录音 / 播报录音提示按钮；通话记录的录音列改为内嵌播放器加下载，并标注「已告知对方：…」或「静默录音，未告知对方」。
+- App：通话页新增录音胶囊（正在录音 / 开始录音 / 接通后可录音 / 后台已关闭录音 / 录音不可用），点开后是录音面板：开关、开启时告知对方、立即播报提示、策略说明与提示播放结果；通话记录详情显示「已录音 · 静默 / 已告知对方 / 提示未成功播放」。
+- 振铃期挂断不同步的修复：09:29 与 09:49 两通电话里后端其实已按 cend 正确结束会话（call_sessions 的 ended_at 与模块日志一致），问题在客户端只信 call.ended 这一帧；丢帧后 /app/voice/state 里通话直接消失，界面就停在「对方振铃中」。现在通话页每 2 秒轮询一次，凡网关不再列出的通话一律记为结束，再向 GET /app/voice/calls/{id} 取回结束原因，先显示约 1.6 秒「通话已结束 · 对方挂断」再退回拨号页；通话记录里 state=ended 的行也会纠正残留的活跃会话。
+- 录音目录不可写不再伪装成模块故障：recorder 先建目录，失败记 record_dir_unwritable 并在界面说明。已在本机创建 /var/lib/sms-gateway/recordings 并交给服务用户。
+
+### 自动化结果
+
+| 检查 | 结果 |
+| --- | --- |
+| 后端全量 pytest | 232 项通过（新增 tests/test_recording_api.py 11 项） |
+| Flutter 全量 | 54 项通过（新增 in_call_page_test.dart 2 项、控制器与模型 12 项） |
+| Dart 静态分析 | 0 error / 0 warning |
+| 接口实测 | GET /app/voice/calls/3cd5a93819e84eea 返回 live=false、state=ended、end_reason=remote_hangup，正是 09:29 那通被对方挂断的电话 |
+| release APK | 重新打包并 adb 覆盖安装到三星 SM-F9360 |
+
+真机走查在手机解锁后补：模拟模块下复现「振铃中对方挂断」与录音开关全流程。验证期间用 systemd drop-in（/etc/systemd/system/sms-gateway.service.d/mock-test.conf）临时启用 SMSGW_MOCK_MODEM，结束后删除该文件并重启网关。
+
+音频线仍未接到模块音频口：录音文件来自服务器当前输入设备（本机麦克风 plughw:0,0）。要录到通话内容，需要把模块音频口接一张 USB 声卡，并在后台「声卡」里把输入设备选成它。
