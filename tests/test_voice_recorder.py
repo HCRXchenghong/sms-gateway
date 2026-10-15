@@ -15,7 +15,10 @@ class StubPlayer:
     def __init__(self):
         self.started = []
         self.stopped = []
-        self.write_bytes = b"RIFFfakewav"
+        # Must stay bigger than a bare WAV header: the recorder drops anything
+        # that size as an empty capture, and this stub stands in for a card
+        # that really did deliver audio.
+        self.write_bytes = b"RIFFfakewav" + b"\x00" * 40
 
     async def start_recording(self, path, device=None):
         self.started.append(Path(path))
@@ -68,7 +71,7 @@ def test_active_state_starts_capture_and_ended_persists_it(tmp_path):
     assert [e[0] for e in events] == ["call.recording", "call.recording"]
     assert events[0][1]["phase"] == "started"
     assert events[1][1]["phase"] == "stopped"
-    assert events[1][1]["size"] == len(b"RIFFfakewav")
+    assert events[1][1]["size"] == len(player.write_bytes)
 
 
 def test_disabled_gate_never_opens_a_capture(tmp_path):

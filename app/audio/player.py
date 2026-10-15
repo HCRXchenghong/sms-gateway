@@ -70,6 +70,9 @@ class RecordingHandle:
     started_at: float = 0.0
     capture_name: Optional[str] = None
     writer: Optional[WavWriter] = None
+    # Set when the shared capture died underneath us, so a REC marker cannot
+    # keep claiming a recording that stopped collecting bytes mid-call.
+    capture_error: Optional[str] = None
 
 
 class AudioPlayer:
@@ -387,17 +390,31 @@ class AudioPlayer:
             log.warning("failed to open the recording file %s: %s", target, e)
             return None
         name = "record:" + target.stem
+        handle = RecordingHandle(
+            path=target, argv=[], process=None, device=device,
+            started_at=time.time(), capture_name=name, writer=writer,
+        )
+
+        def _capture_stopped(error: Optional[str]) -> None:
+            # Only an abnormal end reaches this callback; a plain release pops
+            # the sink first. So anything here means the card stopped feeding
+            # us while the call was still up.
+            if not error:
+                return
+            handle.capture_error = error
+            log.warning("capture for %s stopped early: %s", target.name, error)
+
         ok = await self._capture.subscribe(  # type: ignore[union-attr]
-            name, on_frames=writer.write, device=device, rate=rate
+            name,
+            on_frames=writer.write,
+            on_stop=_capture_stopped,
+            device=device,
+            rate=rate,
         )
         if not ok:
             writer.close()
             log.warning("no capture device answered for %s", target)
             return None
-        handle = RecordingHandle(
-            path=target, argv=[], process=None, device=device,
-            started_at=time.time(), capture_name=name, writer=writer,
-        )
         self._recordings.append(handle)
         return handle
 

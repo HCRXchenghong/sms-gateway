@@ -225,7 +225,10 @@ def test_capture_argv_streams_raw_pcm_to_stdout():
     assert argv, "a capture command must be available on this host"
     assert "-t" in argv and "raw" in argv or "--format=s16le" in argv
     assert "-D" not in argv or "plughw:1,0" in argv
-    assert argv[-1] == "/dev/stdout"
+    # /dev/stdout gets reopened through /proc/self/fd/1, and the kernel answers
+    # ENXIO for an anonymous pipe, so the capture used to die before reading a
+    # single frame. The tools write to stdout without being told a filename.
+    assert "/dev/stdout" not in argv
 
 
 def test_stats_are_serialisable():

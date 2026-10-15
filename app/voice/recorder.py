@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from ..audio.capture import WAV_HEADER_BYTES
 from ..audio.player import RecordingHandle
 from ..config import settings
 from .recording_policy import RecordingDecision, decide_recording
@@ -52,7 +53,7 @@ class _Capture:
         return {
             "call_id": self.call_id,
             "device_id": self.device_id,
-            "recording": self.handle is not None,
+            "recording": self.alive,
             "record": self.decision.record,
             "announce": self.decision.announce,
             "can_change": self.decision.can_change,
@@ -61,6 +62,17 @@ class _Capture:
             "notice": self.notice or None,
             "failed_reason": self.failed_reason,
         }
+
+    @property
+    def alive(self) -> bool:
+        """True only while a capture is open and still feeding us bytes."""
+        if self.handle is None:
+            return False
+        return getattr(self.handle, "capture_error", None) is None
+
+    @property
+    def capture_error(self) -> Optional[str]:
+        return getattr(self.handle, "capture_error", None) if self.handle else None
 
 
 class CallRecorder:
@@ -96,11 +108,11 @@ class CallRecorder:
 
     def is_recording(self, call_id: str) -> bool:
         capture = self._captures.get(call_id)
-        return bool(capture and capture.handle is not None)
+        return bool(capture and capture.alive)
 
     @property
     def active_call_ids(self) -> list[str]:
-        return [cid for cid, cap in self._captures.items() if cap.handle is not None]
+        return [cid for cid, cap in self._captures.items() if cap.alive]
 
     def path_for(self, call_id: str) -> Path:
         return self._dir / (call_id + ".wav")
@@ -324,13 +336,33 @@ class CallRecorder:
         path = await self._player.stop_recording(handle)
         size = path.stat().st_size if path and path.exists() else 0
         capture.path = path
-        if size <= 0:
+        died = capture.capture_error
+        if size <= WAV_HEADER_BYTES:
+            # Header-only means the card never answered. Calling that a saved
+            # recording is what put a silent 44-byte file in the call log while
+            # the operator watched a REC marker the whole call.
             capture.failed_reason = "empty_file"
-            log.warning("recording for call %s is empty, dropping", call_id)
+            capture.path = None
+            log.warning(
+                "recording for call %s captured no audio (%d bytes%s), dropping the file",
+                call_id,
+                size,
+                ": " + died if died else "",
+            )
+            if path is not None and path.exists():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    log.warning("removing the empty recording %s failed: %s", path, exc)
             await self._persist_decision(capture)
             await self._emit("empty", capture, size=0)
             self._captures.pop(call_id, None)
             return None
+        if died:
+            log.warning(
+                "recording for call %s is incomplete, the capture stopped early: %s",
+                call_id, died,
+            )
         if self._persist is not None:
             result = self._persist(call_id, str(path))
             if inspect.isawaitable(result):

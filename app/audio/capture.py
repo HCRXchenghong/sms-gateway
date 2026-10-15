@@ -30,20 +30,33 @@ __all__ = ["capture_argv", "CaptureHub", "capture_hub", "WavWriter", "pcm_to_wav
 FrameSink = Callable[[bytes], None]
 StopSink = Callable[[Optional[str]], None]
 
+# A WAV that only ever got its header. Anything this size holds no audio, so
+# callers treat it as a failed capture rather than a very short recording.
+WAV_HEADER_BYTES = 44
+
 
 def capture_argv(rate: int, device: Optional[str], backend: str = "alsa") -> List[str]:
-    """The command that streams raw mono S16LE PCM to stdout."""
+    """The command that streams raw mono S16LE PCM to stdout.
+
+    None of these are given a filename to write to. /dev/stdout reads like the
+    portable way to say "stdout", but it resolves through /proc/self/fd/1 and
+    the kernel refuses to reopen an anonymous pipe inode, so arecord died with
+    ENXIO the moment our own stdout was a pipe -- which it always is when
+    asyncio spawns the capture under systemd. Every call then "recorded" a
+    44-byte WAV holding no audio at all.
+    """
     if shutil.which("arecord"):
         argv = ["arecord", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(rate), "-c", "1"]
         if device:
             argv += ["-D", device]
-        argv.append("/dev/stdout")
         return argv
     if shutil.which("parecord"):
         argv = ["parecord", "--format=s16le", "--rate=" + str(rate), "--channels=1"]
         if device:
             argv += ["-d", device]
-        argv.append("/dev/stdout")
+        # parecord wants an explicit "-" for stdout; with no argument at all it
+        # fails to open an output file.
+        argv.append("-")
         return argv
     if shutil.which("pw-record"):
         argv = ["pw-record", "--rate", str(rate), "--channels", "1", "--format", "S16LE"]
@@ -120,6 +133,9 @@ class _Stream:
     bytes_read: int = 0
     chunks: int = 0
     error: Optional[str] = None
+    # What the capture tool said on stderr, kept for the post-mortem of a
+    # stream that produced nothing.
+    error_tail: str = ""
     started_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -134,6 +150,7 @@ class _Stream:
             "chunks": self.chunks,
             "seconds": round(time.time() - self.started_at, 1),
             "error": self.error,
+            "error_tail": self.error_tail or None,
         }
 
 
@@ -179,7 +196,10 @@ class CaptureHub:
                     stream.process = await asyncio.create_subprocess_exec(
                         *argv,
                         stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.DEVNULL,
+                        # arecord explains a refused or missing card on stderr.
+                        # Discarding it left us with a silent zero-byte capture
+                        # and no way to tell a busy device from a missing one.
+                        stderr=asyncio.subprocess.PIPE,
                     )
                 except (FileNotFoundError, OSError) as exc:
                     stream.error = str(exc)[:300]
@@ -225,15 +245,24 @@ class CaptureHub:
                 pass
         proc = stream.process
         stream.process = None
-        if proc is not None and proc.returncode is None:
-            proc.terminate()
+        if proc is not None:
+            if proc.returncode is None:
+                proc.terminate()
             try:
-                await asyncio.wait_for(proc.communicate(), timeout=3)
+                _, err = await asyncio.wait_for(proc.communicate(), timeout=3)
+                stream.error_tail = (err or b"").decode("utf-8", "replace").strip()[-400:]
             except (asyncio.TimeoutError, Exception):
                 try:
                     proc.kill()
                 except ProcessLookupError:
                     pass
+        if stream.bytes_read == 0:
+            log.warning(
+                "capture %s ended without audio (rc=%s): %s",
+                stream.key,
+                proc.returncode if proc is not None else None,
+                stream.error_tail or "no error output",
+            )
         log.info("capture stopped for %s (%d bytes)", stream.key, stream.bytes_read)
 
     async def _read_loop(self, stream: _Stream) -> None:
@@ -264,9 +293,6 @@ class CaptureHub:
             # itself, the device went away or arecord exited, and the cleanup
             # is ours to do.
             died_alone = self._streams.get(stream.key) is stream
-            error = stream.error
-            if died_alone and error is None and stream.bytes_read == 0:
-                error = "capture produced no audio"
             stops = list(stream.stops.values())
             if died_alone:
                 async with self._lock:
@@ -276,6 +302,11 @@ class CaptureHub:
                         self._owner.pop(name, None)
                     if self._streams.get(stream.key) is stream:
                         await self._stop_stream_locked(stream)
+            error = stream.error
+            if died_alone and error is None and stream.bytes_read == 0:
+                # Prefer the tool's own words over a generic message; stopping
+                # the stream above is what collected them.
+                error = stream.error_tail or "capture produced no audio"
             for stop in stops:
                 try:
                     stop(error)

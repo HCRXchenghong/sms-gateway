@@ -230,6 +230,16 @@ SMSGW_URL=http://127.0.0.1:8812 npm --prefix tests/web run test:sms
 | 接口实测 | GET /app/voice/calls/3cd5a93819e84eea 返回 live=false、state=ended、end_reason=remote_hangup，正是 09:29 那通被对方挂断的电话 |
 | release APK | 重新打包并 adb 覆盖安装到三星 SM-F9360 |
 
-真机走查在手机解锁后补：模拟模块下复现「振铃中对方挂断」与录音开关全流程。验证期间用 systemd drop-in（/etc/systemd/system/sms-gateway.service.d/mock-test.conf）临时启用 SMSGW_MOCK_MODEM，结束后删除该文件并重启网关。
+真机走查（三星 SM-F9360 外屏，App 为本轮 release 包）：
+
+- 振铃期挂断：拨 10086（模拟模块 no_answer 场景），通话页显示「对方振铃中…」与录音胶囊「接通后可录音」；对方未接听后页面显示「通话已结束 / 无应答 / 10086」约 1.6 秒并自动退回拨号页，不再停在振铃。截图 [振铃胶囊](evidence/2026-10-15/app-ringing-pill.png)、[结束原因](evidence/2026-10-15/app-ended-no-answer.png)。
+- 录音开关：接通后按后台默认自动开始录音，胶囊显示「● 正在录音」；面板里关掉开关变为「开始录音」，再开启并勾选「开启时告知对方」后点「立即播报录音提示」，胶囊变为「● 正在录音 · 已告知对方」，面板给出话术「录音已开启，接下来的通话将被记录」；App 挂断后服务端录音文件约 5.7MB，CDR 记录 recording_notice 与告知结果。截图 [录音中](evidence/2026-10-15/app-recording-on.png)、[已停止](evidence/2026-10-15/app-recording-off.png)、[已告知](evidence/2026-10-15/app-recording-announced.png)。
+- 验证期间用 systemd drop-in（/etc/systemd/system/sms-gateway.service.d/mock-test.conf）临时启用 SMSGW_MOCK_MODEM 以控制对方接听与挂断；结束后删除该文件并重启网关，确认真实模块（编号003）恢复在线、模拟接口返回 404。
+
+### 空录音文件的根因与修复
+
+此前唯一的「录音」是只有 WAV 头的 44 字节文件：capture_argv 把 /dev/stdout 当作输出文件交给 arecord，而 /dev/stdout 经 /proc/self/fd/1 解析，内核拒绝重新打开匿名管道 inode（ENXIO），asyncio 捕获取样的 stdout 恰恰是管道，arecord 因此启动即退出。现改为让工具直接写自己的 stdout（arecord 不带文件名，parecord 与 pw-record 用 -）。同时补了两道防线：capture 的 stderr 不再丢弃，流以 0 字节结束时会把工具原始报错写进日志；stop() 把只有文件头（≤44 字节）的文件按 empty_file 处理，删除文件、向界面报错且不再把路径写进 CDR；capture 在通话中途异常死亡时 handle 记 capture_error，胶囊与接口不再继续声称「正在录音」。12:03 遗留的 44 字节文件与其 CDR 路径已清理。
+
+网页控制台录音联调：tests/web/recording_console.mjs 在独立模拟网关（8812）上覆盖通话卡片的开始录音 / 播报提示 / 停止录音、告知话术不出现「证词」、以及通话记录内嵌播放器与告知结果，连跑三次全部通过。复现方式同短信联调：先起独立模拟网关，再执行 SMSGW_URL=http://127.0.0.1:8812 npm --prefix tests/web run test:recording。
 
 音频线仍未接到模块音频口：录音文件来自服务器当前输入设备（本机麦克风 plughw:0,0）。要录到通话内容，需要把模块音频口接一张 USB 声卡，并在后台「声卡」里把输入设备选成它。
