@@ -201,3 +201,11 @@ SMSGW_URL=http://127.0.0.1:8812 npm --prefix tests/web run test:sms
 截图：[新底部导航](evidence/2026-10-15/nav-samsung-style.png)、[AI 代打标签页](evidence/2026-10-15/ai-calls-tab.png)、[新建任务对话框](evidence/2026-10-15/ai-task-dialog.png)、[任务详情](evidence/2026-10-15/ai-task-detail.png)、[取消后](evidence/2026-10-15/ai-task-cancelled.png)。
 
 音频线仍未接到模块音频口，真实双向语音与翻译听感的最终联调依旧待后续，不计为已通过。
+
+## 2026-10-15 后台的开机自启开关
+
+- 概览页新增「服务与开机自启」面板：显示运行方式、开机自启、服务状态三个指示灯；「开机自启」勾选框对应 systemctl enable / disable；「立即改用服务运行」把手动进程交给 systemd 接管。
+- 后端新增 app/service_control.py 与三个管理员接口：GET /app/admin/service、POST /app/admin/service/autostart、POST /app/admin/service/switch，均写审计。服务单元按当前运行方式生成（工作目录、用户、监听端口、SMSGW_* 环境），checkout 部署与 /opt 部署都适用。
+- 切换脚本等响应返回后才结束手动进程并启动单元，端口不会同时被两个进程占用；关闭自启不影响正在运行的网关。
+- 测试：新增 6 项 pytest（systemd 探针全部伪造），全量 221 项通过。
+- 实测：开关两次后 systemctl is-enabled 随之变化；切换后 is-active=active、进程 PPID 为 1、模块连接正常。网关现由 systemd 管理，重启后由单元自动拉起。

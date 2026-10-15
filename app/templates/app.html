@@ -44,6 +44,30 @@
                 <button type="button" class="button" id="scan-devices-button">搜索设备</button>
             </div>
             <div id="devices-grid" class="devices-grid"></div>
+
+            <div class="panel">
+                <div class="section-head">
+                    <div>
+                        <h2>服务与开机自启</h2>
+                        <span class="hint">开关只改开机自启；切换运行方式会中断连接几秒。</span>
+                    </div>
+                    <button type="button" class="button" id="service-refresh">刷新</button>
+                </div>
+                <div class="form-row">
+                    <span class="mini-label">运行方式</span>
+                    <span id="service-mode" class="chip warn">-</span>
+                    <span class="mini-label">开机自启</span>
+                    <span id="service-enabled" class="chip warn">-</span>
+                    <span class="mini-label">服务状态</span>
+                    <span id="service-active" class="chip warn">-</span>
+                </div>
+                <div class="form-row">
+                    <label class="check"><input type="checkbox" id="service-autostart"> 开机自启</label>
+                    <button type="button" class="button" id="service-switch" hidden>立即改用服务运行</button>
+                </div>
+                <div id="service-status" class="hint"></div>
+                <p class="hint">服务单元按当前运行方式生成（目录、用户、端口与 SMSGW_* 环境）。关闭自启不会停掉正在运行的网关。</p>
+            </div>
         </section>
 
         <section id="tab-send" class="view">

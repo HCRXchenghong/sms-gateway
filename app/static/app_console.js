@@ -1466,6 +1466,76 @@
         });
     }
 
+    // ------------------------------------------------------ service autostart
+
+    async function refreshService() {
+        var mode = $('#service-mode');
+        if (!mode) return;
+        var data;
+        try {
+            data = await json('/app/admin/service');
+        } catch (e) {
+            note('#service-status', '读取服务状态失败：' + e.message, true);
+            return;
+        }
+        mode.textContent = data.service_managed ? 'systemd 服务' : (data.systemd ? '手动进程' : '无 systemd');
+        mode.className = 'chip ' + (data.service_managed ? 'ok' : 'warn');
+        var enabledChip = $('#service-enabled');
+        enabledChip.textContent = data.enabled ? '已开启' : '未开启';
+        enabledChip.className = 'chip ' + (data.enabled ? 'ok' : 'warn');
+        var activeChip = $('#service-active');
+        activeChip.textContent = data.active ? '运行中' : '未运行';
+        activeChip.className = 'chip ' + (data.active ? 'ok' : 'bad');
+        var cb = $('#service-autostart');
+        cb.checked = !!data.enabled;
+        cb.disabled = !data.systemd;
+        var sw = $('#service-switch');
+        if (sw) sw.hidden = !(data.systemd && data.installed && !data.service_managed);
+        if (data.error) note('#service-status', data.error, true);
+    }
+
+    function initServicePanel() {
+        var cb = $('#service-autostart');
+        if (!cb) return;
+        cb.addEventListener('change', async function() {
+            var want = cb.checked;
+            note('#service-status', want ? '开启开机自启…' : '关闭开机自启…');
+            try {
+                var r = await api('/app/admin/service/autostart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: want })
+                });
+                if (!r.ok) throw new Error(await errorText(r));
+                note('#service-status', want
+                    ? '开机自启已开启，重启后由 systemd 拉起'
+                    : '开机自启已关闭，正在运行的网关不受影响');
+            } catch (e) {
+                note('#service-status', '设置失败：' + e.message, true);
+            }
+            await refreshService();
+        });
+        var sw = $('#service-switch');
+        if (sw) sw.addEventListener('click', async function() {
+            if (!confirm('将结束当前手动进程并由 systemd 接管，连接会中断几秒。继续？')) return;
+            try {
+                var r = await api('/app/admin/service/switch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                if (!r.ok) throw new Error(await errorText(r));
+                note('#service-status', '正在切换，页面稍后自动重连…');
+                setTimeout(refreshService, 6000);
+                setTimeout(refreshService, 12000);
+            } catch (e) {
+                note('#service-status', '切换失败：' + e.message, true);
+            }
+        });
+        var refresh = $('#service-refresh');
+        if (refresh) refresh.addEventListener('click', refreshService);
+    }
+
     // ------------------------------------------------------------------- init
 
     async function init() {
@@ -1475,6 +1545,7 @@
         initAudioTab();
         initAiTab();
         initCallflowTab();
+        initServicePanel();
         initSecurityTab();
     initAccountsTab();
 
@@ -1487,6 +1558,7 @@
         refreshCallflowSettings();
         refreshTasks();
         refreshFlowPanel();
+        refreshService();
 
         connectConsoleWs();
         setInterval(refreshCalls, 5000);

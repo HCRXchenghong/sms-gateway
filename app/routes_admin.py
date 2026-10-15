@@ -8,7 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from . import repo, repo_admin, repo_calls, security
+from . import repo, repo_admin, repo_calls, security, service_control
 from .auth import CurrentUser, get_current_user, require_role
 from .config import settings
 from .db import connection
@@ -431,3 +431,54 @@ async def admin_stats(request: Request, user: CurrentUser = Depends(get_current_
         "users_total": len(users),
         "users_active": sum(1 for u in users if u["is_active"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Service autostart
+# ---------------------------------------------------------------------------
+
+
+class AutostartBody(BaseModel):
+    enabled: bool = Field(..., description="True to start the gateway on boot.")
+
+
+def _service_error(exc: service_control.ServiceError) -> HTTPException:
+    return HTTPException(
+        status.HTTP_400_BAD_REQUEST,
+        {"error": {"code": "service_control", "message": str(exc)}},
+    )
+
+
+@router.get("/app/admin/service")
+async def admin_service(request: Request, user: CurrentUser = AdminUser):
+    """How the gateway runs right now and whether boot autostart is on."""
+    return await asyncio.to_thread(service_control.status)
+
+
+@router.post("/app/admin/service/autostart")
+async def admin_service_autostart(
+    body: AutostartBody, request: Request, user: CurrentUser = AdminUser
+):
+    try:
+        result = await asyncio.to_thread(service_control.set_autostart, body.enabled)
+    except service_control.ServiceError as e:
+        raise _service_error(e)
+    await asyncio.to_thread(
+        repo.audit, "user", user.id, user.username, _client_ip(request),
+        "service.autostart", "on" if body.enabled else "off", 200,
+    )
+    return result
+
+
+@router.post("/app/admin/service/switch")
+async def admin_service_switch(request: Request, user: CurrentUser = AdminUser):
+    """End the manual process and let systemd take over, after this reply."""
+    try:
+        result = await asyncio.to_thread(service_control.switch_to_service)
+    except service_control.ServiceError as e:
+        raise _service_error(e)
+    await asyncio.to_thread(
+        repo.audit, "user", user.id, user.username, _client_ip(request),
+        "service.switch", service_control.UNIT_NAME, 200,
+    )
+    return result
