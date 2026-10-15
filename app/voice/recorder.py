@@ -112,6 +112,29 @@ class CallRecorder:
     def snapshot(self) -> list[dict]:
         return [cap.to_dict() for cap in self._captures.values()]
 
+    def policy(self) -> str:
+        """The configured policy name, for consoles that label the switch."""
+        return str(self._policy())
+
+    def status(self, call_id: str) -> dict:
+        """Everything a client needs to render one call's recording control.
+
+        The decision is resolved with no operator override so can_change tells
+        the truth about whether the toggle below will be honoured: a forced
+        policy cannot be switched off from a phone, and a disabled one cannot
+        be switched on.
+        """
+        capture = self._captures.get(call_id)
+        decision = self.decide(mid_call=True)
+        return {
+            "call_id": call_id,
+            "recording": self.is_recording(call_id),
+            "capture": capture.to_dict() if capture else None,
+            "policy": self.policy(),
+            "decision": decision.to_dict(),
+            "notice": (capture.notice if capture else None) or None,
+        }
+
     def decide(
         self,
         *,
@@ -188,6 +211,21 @@ class CallRecorder:
             return None
 
         path = self.path_for(call_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # The default record directory lives under /var/lib, which the
+            # service user may not be allowed to create. Raising here would
+            # escape into the call prompt hook and look like a modem failure,
+            # so report it as the capture problem it is.
+            capture.failed_reason = "record_dir_unwritable"
+            log.error(
+                "recording directory %s is not writable (%s); call %s is NOT being recorded",
+                path.parent, exc, call_id,
+            )
+            await self._persist_decision(capture)
+            await self._emit("unavailable", capture)
+            return None
         handle = await self._player.start_recording(path)
         if handle is None:
             capture.failed_reason = "no_input_device"

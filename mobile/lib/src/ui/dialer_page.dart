@@ -394,6 +394,10 @@ class _CallLogView extends StatelessWidget {
             _row(context, '通话时长', _duration(r.duration)),
             _row(context, '使用设备', r.deviceName ?? '-'),
             _row(context, 'SIM 号码', r.simNumber ?? '-'),
+            _row(context, '录音', r.recordingLabel),
+            if (r.recordingNotice != null)
+              _row(context, '录音提示',
+                  '「' + r.recordingNotice! + '」' + (r.recordingNoticeOk == true ? '' : '（未成功播放）')),
             _row(context, 'Call ID', r.callId),
             const SizedBox(height: 16),
             Row(

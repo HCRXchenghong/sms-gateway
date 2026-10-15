@@ -32,6 +32,19 @@ bool _asBool(Object? v, [bool fallback = false]) {
   return s == 'true' || s == '1' || s == 'yes';
 }
 
+/// Like [_asBool] but keeps "absent" distinct from false. Recording state
+/// reaches the app in three payload shapes, and a key one of them omits must
+/// not overwrite a value an earlier response already reported.
+bool? _boolOrNull(Object? v) {
+  if (v == null) return null;
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  final s = v.toString().trim().toLowerCase();
+  if (s == 'true' || s == '1' || s == 'yes') return true;
+  if (s == 'false' || s == '0' || s == 'no') return false;
+  return null;
+}
+
 /// One A7670X module as reported by /app/devices.
 class DeviceInfo {
   DeviceInfo({
@@ -190,14 +203,31 @@ class CallRecord extends CallSession {
     this.deviceCode,
     this.simNumber,
     this.recordingPath,
+    this.recordingReason,
+    this.recordingNotice,
+    this.recordingNoticeOk,
   });
 
   final String? deviceName;
   final String? deviceCode;
   final String? simNumber;
   final String? recordingPath;
+  final String? recordingReason;
+
+  /// The sentence the far end heard, when they were told the call is recorded.
+  final String? recordingNotice;
+  final bool? recordingNoticeOk;
 
   bool get hasRecording => recordingPath != null && recordingPath!.isNotEmpty;
+
+  /// Recording outcome as one line for the call log.
+  String get recordingLabel {
+    if (!hasRecording) {
+      return recordingReason == 'policy_disabled' ? '策略关闭' : '未录音';
+    }
+    if (recordingNotice == null) return '已录音 · 静默';
+    return recordingNoticeOk == true ? '已录音 · 已告知对方' : '已录音 · 提示未成功播放';
+  }
 
   factory CallRecord.fromJson(Map<String, dynamic> json) {
     final dev = json['device'];
@@ -216,6 +246,140 @@ class CallRecord extends CallSession {
       deviceCode: dev is Map ? _asStr(dev['code']) : null,
       simNumber: _asStr(json['sim_number']),
       recordingPath: _asStr(json['recording_path']),
+      recordingReason: _asStr(json['recording_reason']),
+      recordingNotice: _asStr(json['recording_notice']),
+      recordingNoticeOk: _boolOrNull(json['recording_notice_ok']),
+    );
+  }
+}
+
+/// Whether one call is being recorded, and whether the operator may change it.
+///
+/// Three server shapes land here: the flat capture dict published on the
+/// call.recording websocket event, the same dict nested under "capture" by
+/// /app/voice/calls/{id}/recording/state, and the per-call "recording" flag on
+/// /app/voice/state. [fallback] keeps the fields a given shape does not carry,
+/// so a websocket frame cannot erase the policy the status call reported.
+class CallRecording {
+  CallRecording({
+    required this.callId,
+    this.recording = false,
+    this.canChange = true,
+    this.policy = 'optional',
+    this.reason = '',
+    this.announce = false,
+    this.noticeText,
+    this.noticeOk,
+    this.noticeError,
+    this.failedReason,
+    this.path,
+  });
+
+  final String callId;
+
+  /// A capture process is running right now.
+  final bool recording;
+  final bool canChange;
+  final String policy;
+  final String reason;
+  final bool announce;
+  final String? noticeText;
+  final bool? noticeOk;
+  final String? noticeError;
+  final String? failedReason;
+  final String? path;
+
+  bool get forced => policy == 'forced';
+  bool get blocked => policy == 'disabled';
+  bool get announced => noticeOk == true;
+
+  String get policyLabel => switch (policy) {
+        'forced' => '强制录音',
+        'disabled' => '不录音',
+        _ => '可选择录音',
+      };
+
+  String get reasonLabel => switch (reason) {
+        'policy_forced' => '后台策略要求全程录音',
+        'policy_disabled' => '后台策略已关闭录音',
+        'policy_default' => '按后台默认设置',
+        'operator_enabled' => '手动开启',
+        'operator_disabled' => '手动关闭',
+        _ => reason,
+      };
+
+  String get failedLabel => switch (failedReason ?? '') {
+        'audio_capture_disabled' => '服务器声卡采集已关闭',
+        'no_input_device' => '服务器没有可用的录音输入设备',
+        'empty_file' => '录音文件为空，已丢弃',
+        'record_dir_unwritable' => '服务器录音目录不可写',
+        '' => '',
+        _ => failedReason!,
+      };
+
+  CallRecording copyWith({bool? recording, String? path}) => CallRecording(
+        callId: callId,
+        recording: recording ?? this.recording,
+        canChange: canChange,
+        policy: policy,
+        reason: reason,
+        announce: announce,
+        noticeText: noticeText,
+        noticeOk: noticeOk,
+        noticeError: noticeError,
+        failedReason: failedReason,
+        path: path ?? this.path,
+      );
+
+  factory CallRecording.fromJson(
+    String callId,
+    Map<String, dynamic> json, {
+    CallRecording? fallback,
+  }) {
+    final rawCapture = json['capture'];
+    final rawDecision = json['decision'];
+    final capture = rawCapture is Map ? Map<String, dynamic>.from(rawCapture) : json;
+    final decision = rawDecision is Map ? Map<String, dynamic>.from(rawDecision) : capture;
+    final rawNotice = json['notice'] ?? capture['notice'];
+    final notice = rawNotice is Map ? Map<String, dynamic>.from(rawNotice) : null;
+
+    final canChange = _boolOrNull(decision['can_change']) ??
+        _boolOrNull(capture['can_change']) ??
+        fallback?.canChange ??
+        true;
+    final record = _boolOrNull(decision['record']) ?? _boolOrNull(capture['record']);
+    var policy = _asStr(json['policy']) ?? _asStr(decision['policy']) ?? fallback?.policy;
+    if (policy == null) {
+      // The websocket frame carries no policy name. Derive it so the label
+      // stays honest instead of claiming a switch that will be refused.
+      policy = !canChange
+          ? (record == false ? 'disabled' : 'forced')
+          : 'optional';
+    }
+
+    return CallRecording(
+      callId: callId,
+      recording: _boolOrNull(capture['recording']) ??
+          _boolOrNull(json['recording']) ??
+          fallback?.recording ??
+          false,
+      canChange: canChange,
+      policy: policy,
+      reason: _asStr(decision['reason']) ??
+          _asStr(capture['reason']) ??
+          fallback?.reason ??
+          '',
+      announce: _boolOrNull(decision['announce']) ??
+          _boolOrNull(capture['announce']) ??
+          fallback?.announce ??
+          false,
+      noticeText: _asStr(notice?['text']) ?? fallback?.noticeText,
+      noticeOk: notice == null ? fallback?.noticeOk : _boolOrNull(notice['ok']),
+      noticeError: _asStr(notice?['error']) ?? fallback?.noticeError,
+      failedReason: _asStr(capture['failed_reason']) ?? fallback?.failedReason,
+      path: _asStr(capture['path']) ??
+          _asStr(json['recording_path']) ??
+          fallback?.path,
     );
   }
 }

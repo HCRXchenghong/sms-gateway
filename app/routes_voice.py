@@ -54,6 +54,16 @@ def _modems(request: Request):
     return getattr(request.app.state, "modems", None) or getattr(request.app.state, "modem", None)
 
 
+def _recorder(request: Request):
+    recorder = getattr(request.app.state, "recorder", None)
+    if recorder is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            {"error": {"code": "unavailable", "message": "录音子系统未就绪"}},
+        )
+    return recorder
+
+
 def _http_voice_error(exc: VoiceError) -> HTTPException:
     return HTTPException(status.HTTP_409_CONFLICT, {"error": {"code": "call_rejected", "message": str(exc)}})
 
@@ -106,6 +116,17 @@ class MockScenarioBody(BaseModel):
 class MockSmsBody(BaseModel):
     sender: str = Field(..., min_length=2, max_length=32)
     content: str = Field(..., min_length=1, max_length=1024)
+
+
+class RecordingBody(BaseModel):
+    """Operator recording switch for one live call.
+
+    announce decides whether the far end is told. Leaving it null follows the
+    configured default, so a silent capture stays silent unless asked for.
+    """
+
+    enabled: bool = True
+    announce: Optional[bool] = None
 
 
 @router.post("/app/sms/mock/{device_id}/incoming")
@@ -186,7 +207,15 @@ async def mock_debug(device_id: int, request: Request, user: CurrentUser = Depen
 async def voice_state(request: Request, user: CurrentUser = Depends(get_current_user)):
     calls = _calls(request)
     modems = _modems(request)
-    active = [s.to_dict() for s in calls.active_sessions()]
+    recorder = getattr(request.app.state, "recorder", None)
+    active = []
+    for session in calls.active_sessions():
+        payload = session.to_dict()
+        capture = recorder.capture_for(session.call_id) if recorder else None
+        payload["recording"] = bool(capture and capture.get("recording"))
+        if capture:
+            payload["recording_detail"] = capture
+        active.append(payload)
     online = modems.online_device_ids() if modems else []
     return {
         "voice_enabled": settings.voice_enabled,
@@ -194,8 +223,9 @@ async def voice_state(request: Request, user: CurrentUser = Depends(get_current_
         "online_device_ids": online,
         "active": active,
         "count": len(active),
-        "recording_call_ids": list(getattr(request.app.state, "recorder", None).active_call_ids
-                                 if getattr(request.app.state, "recorder", None) else []),
+        "recording_call_ids": list(recorder.active_call_ids) if recorder else [],
+        "recording": recorder.snapshot() if recorder else [],
+        "recording_policy": recorder.policy() if recorder else settings.recording_policy,
     }
 
 
@@ -282,6 +312,116 @@ async def voice_history(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "limit must be 1..500")
     rows = await asyncio.to_thread(repo_calls.list_calls, limit, device_id, remote, direction, since)
     return {"items": [repo_calls.serialize_call(r) for r in rows], "count": len(rows)}
+
+
+@router.get("/app/voice/calls/{call_id}")
+async def call_detail(
+    call_id: str, request: Request, user: CurrentUser = Depends(get_current_user)
+):
+    """Authoritative state of one call, live or finished.
+
+    A client that missed the call.ended websocket frame has no way to learn
+    what happened from /app/voice/state, because a finished call simply is not
+    in that list any more. This answers for a specific call id so the screen
+    can leave the ringing state and say why the call ended.
+    """
+    session = _calls(request).session_by_id(call_id)
+    if session is not None:
+        return {
+            "call_id": call_id,
+            "live": session.state.value not in ("idle", "ended"),
+            "call": session.to_dict(),
+        }
+    row = await asyncio.to_thread(repo_calls.get_call, call_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到这通电话")
+    return {"call_id": call_id, "live": False, "call": repo_calls.serialize_call(row)}
+
+
+@router.get("/app/voice/calls/{call_id}/recording/state")
+async def call_recording_state(
+    call_id: str, request: Request, user: CurrentUser = Depends(get_current_user)
+):
+    """Recording status for one call plus whether the operator may change it."""
+    recorder = _recorder(request)
+    session = _calls(request).session_by_id(call_id)
+    status_payload = recorder.status(call_id)
+    status_payload["live"] = session is not None and session.state.value not in ("idle", "ended")
+    if session is None:
+        row = await asyncio.to_thread(repo_calls.get_call, call_id)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到这通电话")
+        status_payload["recording_path"] = row["recording_path"]
+    return status_payload
+
+
+@router.post("/app/voice/calls/{call_id}/recording")
+async def set_call_recording(
+    call_id: str,
+    body: RecordingBody,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Start or stop capturing this call. Refused when the policy is fixed."""
+    recorder = _recorder(request)
+    session = _calls(request).session_by_id(call_id)
+    if session is None or session.state.value in ("idle", "ended"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"error": {"code": "call_not_live", "message": "通话已结束，无法更改录音"}},
+        )
+    result = await recorder.set_recording(
+        call_id, body.enabled, device_id=session.device_id, announce=body.announce
+    )
+    action = "call.recording.start" if body.enabled else "call.recording.stop"
+    await asyncio.to_thread(
+        repo.audit,
+        "user",
+        user.id,
+        user.username,
+        _client_ip(request),
+        action,
+        call_id,
+        200 if result.get("ok") else 409,
+    )
+    if not result.get("ok"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"error": {"code": "recording_policy", "message": result.get("error") or "当前录音策略不允许修改"}},
+        )
+    result["status"] = recorder.status(call_id)
+    return result
+
+
+@router.post("/app/voice/calls/{call_id}/recording/announce")
+async def announce_call_recording(
+    call_id: str, request: Request, user: CurrentUser = Depends(get_current_user)
+):
+    """Tell the far end, mid-call, that the conversation is being recorded."""
+    recorder = _recorder(request)
+    notice = await recorder.announce(call_id, mid_call=True)
+    if notice.get("error") == "no such call":
+        # No capture is open for this id. That is a different situation from an
+        # unknown call, and saying so keeps the operator from hunting for a
+        # call that is still up and simply not being recorded.
+        session = _calls(request).session_by_id(call_id)
+        if session is not None and session.state.value not in ("idle", "ended"):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"error": {"code": "not_recording", "message": "这通电话当前没有录音，无法播报提示"}},
+            )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到这通电话")
+    await asyncio.to_thread(
+        repo.audit,
+        "user",
+        user.id,
+        user.username,
+        _client_ip(request),
+        "call.recording.announce",
+        call_id,
+        200 if notice.get("ok") else 502,
+    )
+    return {"ok": bool(notice.get("ok")), "notice": notice, "status": recorder.status(call_id)}
 
 
 @router.get("/app/voice/calls/{call_id}/recording")

@@ -238,6 +238,150 @@ void main() {
       });
       expect(r.hasRecording, isFalse);
     });
+
+    test('the call log says whether the far end was told', () {
+      final silent = CallRecord.fromJson(const {
+        'call_id': 'c-11',
+        'device_id': 3,
+        'direction': 'outbound',
+        'state': 'ended',
+        'recording_path': '/var/lib/sms-gateway/recordings/c-11.wav',
+      });
+      expect(silent.recordingLabel, '已录音 · 静默');
+
+      final told = CallRecord.fromJson(const {
+        'call_id': 'c-12',
+        'device_id': 3,
+        'direction': 'outbound',
+        'state': 'ended',
+        'recording_path': '/var/lib/sms-gateway/recordings/c-12.wav',
+        'recording_notice': '本次通话已开启录音',
+        'recording_notice_ok': true,
+      });
+      expect(told.recordingLabel, '已录音 · 已告知对方');
+
+      final failed = CallRecord.fromJson(const {
+        'call_id': 'c-13',
+        'device_id': 3,
+        'direction': 'outbound',
+        'state': 'ended',
+        'recording_path': '/var/lib/sms-gateway/recordings/c-13.wav',
+        'recording_notice': '本次通话已开启录音',
+        'recording_notice_ok': false,
+      });
+      expect(failed.recordingLabel, '已录音 · 提示未成功播放');
+
+      final off = CallRecord.fromJson(const {
+        'call_id': 'c-14',
+        'device_id': 3,
+        'direction': 'outbound',
+        'state': 'ended',
+        'recording_reason': 'policy_disabled',
+      });
+      expect(off.recordingLabel, '策略关闭');
+    });
+  });
+
+  group('CallRecording', () {
+    test('the status payload carries the policy and whether it may change', () {
+      final rec = CallRecording.fromJson('c-20', const {
+        'call_id': 'c-20',
+        'recording': true,
+        'live': true,
+        'policy': 'optional',
+        'capture': {
+          'call_id': 'c-20',
+          'recording': true,
+          'record': true,
+          'announce': false,
+          'can_change': true,
+          'reason': 'operator_enabled',
+          'path': '/var/lib/sms-gateway/recordings/c-20.wav',
+        },
+        'decision': {
+          'record': true,
+          'announce': false,
+          'can_change': true,
+          'reason': 'operator_enabled',
+        },
+      });
+      expect(rec.recording, isTrue);
+      expect(rec.canChange, isTrue);
+      expect(rec.policyLabel, '可选择录音');
+      expect(rec.reasonLabel, '手动开启');
+      expect(rec.path, endsWith('c-20.wav'));
+    });
+
+    test('a forced policy says the switch will be refused', () {
+      final rec = CallRecording.fromJson('c-21', const {
+        'call_id': 'c-21',
+        'policy': 'forced',
+        'capture': {'recording': true, 'can_change': false, 'reason': 'policy_forced'},
+        'decision': {'record': true, 'announce': false, 'can_change': false, 'reason': 'policy_forced'},
+      });
+      expect(rec.canChange, isFalse);
+      expect(rec.forced, isTrue);
+      expect(rec.policyLabel, '强制录音');
+      expect(rec.reasonLabel, '后台策略要求全程录音');
+    });
+
+    test('the flat websocket frame derives the policy from can_change', () {
+      // call.recording publishes the capture dict on its own, with no policy
+      // name, and it must not turn a mandated capture into a switchable one.
+      final rec = CallRecording.fromJson('c-22', const {
+        'call_id': 'c-22',
+        'device_id': 3,
+        'recording': true,
+        'record': true,
+        'announce': false,
+        'can_change': false,
+        'reason': 'policy_forced',
+        'phase': 'started',
+      });
+      expect(rec.policy, 'forced');
+      expect(rec.canChange, isFalse);
+      expect(rec.recording, isTrue);
+    });
+
+    test('a later frame keeps the fields an earlier response supplied', () {
+      final first = CallRecording.fromJson('c-23', const {
+        'call_id': 'c-23',
+        'policy': 'optional',
+        'decision': {'can_change': true, 'record': false, 'reason': 'policy_default'},
+      });
+      final second = CallRecording.fromJson(
+        'c-23',
+        const {
+          'call_id': 'c-23',
+          'recording': true,
+          'record': true,
+          'can_change': true,
+          'reason': 'operator_enabled',
+          'notice': {'text': '录音已开启，接下来的通话将被记录', 'ok': true, 'mid_call': true},
+          'phase': 'announced',
+        },
+        fallback: first,
+      );
+      expect(second.recording, isTrue);
+      expect(second.policy, 'optional', reason: 'the frame carries no policy name');
+      expect(second.noticeText, '录音已开启，接下来的通话将被记录');
+      expect(second.announced, isTrue);
+      // The sentence tells the far end recording started and claims nothing else.
+      expect(second.noticeText, isNot(contains('证词')));
+    });
+
+    test('a capture that could not run says why', () {
+      final rec = CallRecording.fromJson('c-24', const {
+        'call_id': 'c-24',
+        'recording': false,
+        'record': true,
+        'can_change': false,
+        'reason': 'policy_forced',
+        'failed_reason': 'no_input_device',
+      });
+      expect(rec.recording, isFalse);
+      expect(rec.failedLabel, '服务器没有可用的录音输入设备');
+    });
   });
 }
 

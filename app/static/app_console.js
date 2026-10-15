@@ -87,6 +87,15 @@
         no_dialtone: '无拨号音', timeout: '超时', error: '失败', unknown: '未知'
     };
 
+    // Why a capture that should have run did not. Reporting this matters more
+    // than hiding it: a forced policy that captured nothing is an error.
+    var RECORD_FAILURE = {
+        audio_capture_disabled: '服务器声卡采集已关闭',
+        no_input_device: '服务器没有可用的录音输入设备',
+        empty_file: '录音文件为空，已丢弃',
+        record_dir_unwritable: '录音目录不可写，请检查 /var/lib/sms-gateway/recordings 的权限'
+    };
+
     var state = { devices: [], calls: [], audio: null, prompts: [], isAdmin: false, voiceState: null };
 
     // ---------------------------------------------------------------- devices
@@ -207,6 +216,14 @@
         head.appendChild(el('strong', null, c.remote || '未知号码'));
         head.appendChild(el('span', { class: 'chip ' + (c.state === 'active' ? 'ok' : (live ? 'warn' : 'bad')) },
             STATE_LABEL[c.state] || c.state));
+        var policy = recordingPolicy();
+        if (c.recording) {
+            head.appendChild(el('span', { class: 'chip bad' }, '● 录音中'));
+        } else if (policy === 'disabled') {
+            head.appendChild(el('span', { class: 'chip' }, '不录音'));
+        } else if (policy === 'forced') {
+            head.appendChild(el('span', { class: 'chip warn' }, '强制录音未生效'));
+        }
         card.appendChild(head);
 
         var meta = el('div', { class: 'call-card-meta' });
@@ -215,6 +232,19 @@
             (c.answered_at ? ' · 已通话 ' + fmtDuration(Math.floor(Date.now() / 1000) - c.answered_at) : '') +
             (c.end_reason ? ' · ' + (REASON_LABEL[c.end_reason] || c.end_reason) : '');
         card.appendChild(meta);
+
+        var capture = c.recording_detail || recordingFor(c.call_id);
+        if (capture && capture.notice) {
+            var told = el('div', { class: 'call-card-meta' });
+            told.textContent = capture.notice.ok
+                ? '已告知对方录音：「' + capture.notice.text + '」'
+                : '录音提示未成功播放：' + (capture.notice.error || '未知原因');
+            card.appendChild(told);
+        } else if (capture && capture.failed_reason) {
+            var failed = el('div', { class: 'call-card-meta' });
+            failed.textContent = '录音未能开始：' + RECORD_FAILURE[capture.failed_reason];
+            card.appendChild(failed);
+        }
 
         if ((c.tts_log || []).length) {
             var logBox = el('div', { class: 'call-tts-log' });
@@ -235,9 +265,54 @@
             actions.appendChild(callButton('按键', '', function() { openDtmf(c); }));
             actions.appendChild(callButton('TTS 播报', '', function() { openTts(c); }));
             actions.appendChild(callButton('停止播报', '', function() { callAction(c.device_id, 'tts/stop'); }));
+            if (policy === 'optional') {
+                if (c.recording) {
+                    actions.appendChild(callButton('停止录音', '', function() { setRecording(c.call_id, false); }));
+                    actions.appendChild(callButton('播报录音提示', '', function() { announceRecording(c.call_id); }));
+                } else {
+                    actions.appendChild(callButton('开始录音', '', function() { setRecording(c.call_id, true, false); }));
+                    actions.appendChild(callButton('录音并告知对方', '', function() { setRecording(c.call_id, true, true); }));
+                }
+            }
         }
         card.appendChild(actions);
         return card;
+    }
+
+    // ------------------------------------------------------------- recording
+
+    function recordingPolicy() {
+        return (state.voiceState && state.voiceState.recording_policy) || 'optional';
+    }
+
+    function recordingFor(callId) {
+        var list = (state.voiceState && state.voiceState.recording) || [];
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].call_id === callId) return list[i];
+        }
+        return null;
+    }
+
+    async function setRecording(callId, enabled, announce) {
+        var body = { enabled: !!enabled };
+        if (announce !== undefined && announce !== null) body.announce = !!announce;
+        try {
+            await post('/app/voice/calls/' + encodeURIComponent(callId) + '/recording', body);
+            note('#dial-status', enabled ? '已开始录音' : '已停止录音，文件已保存');
+        } catch (e) {
+            note('#dial-status', '录音操作失败：' + e.message, true);
+        }
+        await refreshCalls();
+    }
+
+    async function announceRecording(callId) {
+        try {
+            var data = await post('/app/voice/calls/' + encodeURIComponent(callId) + '/recording/announce', {});
+            note('#dial-status', data && data.ok ? '已向对方播报录音提示' : '提示播放失败');
+        } catch (e) {
+            note('#dial-status', '播报录音提示失败：' + e.message, true);
+        }
+        await refreshCalls();
     }
 
     function callButton(label, cls, handler) {
@@ -366,15 +441,29 @@
                 tr.appendChild(el('td', null, fmtDuration(c.duration)));
                 var recCell = el('td');
                 if (c.recording_path) {
-                    var link = el('a', {
-                        href: '/app/voice/calls/' + encodeURIComponent(c.call_id) + '/recording',
-                        target: '_blank',
-                        rel: 'noopener'
-                    }, '播放');
-                    link.className = 'linklike';
-                    recCell.appendChild(link);
+                    var url = '/app/voice/calls/' + encodeURIComponent(c.call_id) + '/recording';
+                    recCell.appendChild(el('audio', {
+                        controls: 'controls',
+                        preload: 'none',
+                        src: url,
+                        style: 'height:30px;width:220px;vertical-align:middle'
+                    }));
+                    var dl = el('a', { href: url, download: c.call_id + '.wav' }, '下载');
+                    dl.className = 'linklike';
+                    dl.style.marginLeft = '8px';
+                    recCell.appendChild(dl);
+                    // Whether the far end was told is part of the record, so it
+                    // travels with the audio instead of living in a settings page.
+                    if (c.recording_notice) {
+                        recCell.appendChild(el('div', { class: 'hint' },
+                            (c.recording_notice_ok ? '已告知对方：' : '提示未成功播放：') +
+                            '「' + c.recording_notice + '」' +
+                            (c.recording_notice_error ? ' · ' + c.recording_notice_error : '')));
+                    } else {
+                        recCell.appendChild(el('div', { class: 'hint' }, '静默录音，未告知对方'));
+                    }
                 } else {
-                    recCell.textContent = '-';
+                    recCell.textContent = c.recording_reason === 'policy_disabled' ? '策略关闭' : '-';
                 }
                 tr.appendChild(recCell);
                 tbody.appendChild(tr);
@@ -544,6 +633,11 @@
             if (name.indexOf('call.') === 0) {
                 refreshCalls();
                 if (name === 'call.ended') { refreshCallHistory(); refreshCallStats(); }
+                // A finished capture writes the file path onto the CDR row, so
+                // the log has to be re-read before the play control appears.
+                if (name === 'call.recording' && (data.phase === 'stopped' || data.phase === 'empty')) {
+                    refreshCallHistory();
+                }
                 if (name === 'call.prompt' && data.prompt) {
                     var text = promptText(data.prompt);
                     if (text) note('#dial-status', text);

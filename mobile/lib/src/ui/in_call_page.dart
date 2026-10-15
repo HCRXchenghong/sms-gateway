@@ -27,9 +27,11 @@ class InCallPage extends StatefulWidget {
 
 class _InCallPageState extends State<InCallPage> {
   Timer? _ticker;
+  Timer? _poll;
   int _elapsed = 0;
   bool _showKeypad = false;
   bool _muted = false;
+  bool _closing = false;
   final TextEditingController _tts = TextEditingController();
 
   @override
@@ -37,20 +39,48 @@ class _InCallPageState extends State<InCallPage> {
     super.initState();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
     _tick();
-    final ai = context.read<AppScope>().aiCalls;
-    unawaited(ai.refreshFlow(widget.callId));
-    unawaited(ai.refreshTranscript(widget.callId));
+    final scope = context.read<AppScope>();
+    unawaited(scope.aiCalls.refreshFlow(widget.callId));
+    unawaited(scope.aiCalls.refreshTranscript(widget.callId));
+    unawaited(scope.calls.refreshRecording(widget.callId));
+    // The socket can be down for exactly the second that matters, so the live
+    // state is re-read while this screen is up. That is what closes the screen
+    // when the far end releases the call during ringing: the gateway drops the
+    // finished call from /app/voice/state, and the poll turns that gap into an
+    // ended session even when the call.ended frame never arrived.
+    _poll = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted || _closing) return;
+      unawaited(context.read<AppScope>().calls.refresh());
+    });
   }
 
   @override
   void dispose() {
     _ticker?.cancel();
+    _poll?.cancel();
     _tts.dispose();
     super.dispose();
   }
 
   CallSession? _find(AppScope scope) {
     return scope.calls.registry[widget.callId];
+  }
+
+  /// Leave the call screen once the call is over, after a beat that says why.
+  ///
+  /// Popping in the same frame the state flips reads as the app losing track
+  /// of the call, which is what made a hangup during ringing look broken. The
+  /// reason is fetched from the gateway because the live list only reports
+  /// that the call is gone, not who ended it.
+  void _beginClosing(AppScope scope) {
+    if (_closing) return;
+    _closing = true;
+    _ticker?.cancel();
+    _poll?.cancel();
+    unawaited(scope.calls.fetchCallDetail(widget.callId));
+    Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) Navigator.of(context).maybePop();
+    });
   }
 
   void _tick() {
@@ -216,15 +246,22 @@ class _InCallPageState extends State<InCallPage> {
     );
   }
 
+  void _openRecordingSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _RecordingSheet(callId: widget.callId),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final scope = context.watch<AppScope>();
     final call = _find(scope);
     if (call == null || call.isEnded) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) Navigator.of(context).maybePop();
-      });
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      _beginClosing(scope);
+      return _EndedScreen(call: call);
     }
     final scheme = Theme.of(context).colorScheme;
     final name = scope.contacts.nameFor(call.remote ?? '') ?? call.remote ?? '未知号码';
@@ -260,6 +297,12 @@ class _InCallPageState extends State<InCallPage> {
                   (device.simNumber == null ? '' : ' · ' + device.simNumber!),
                   style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
             ],
+            const SizedBox(height: 10),
+            _RecordingPill(
+              recording: scope.calls.recordingFor(widget.callId),
+              live: call.state == CallState.active || call.state == CallState.held,
+              onTap: _openRecordingSheet,
+            ),
             if (scope.calls.notice != null) ...[
               const SizedBox(height: 10),
               Container(
@@ -1048,6 +1091,310 @@ class _MinutesDialog extends StatelessWidget {
           child: const Text('关闭'),
         ),
       ],
+    );
+  }
+}
+
+/// Shown for the moment between the call ending and the screen closing.
+///
+/// A hangup that arrives while the phone is still ringing used to leave this
+/// screen up indefinitely, because the only thing that closed it was a
+/// websocket frame the app had already missed. Now the poll ends the session,
+/// this panel reports who hung up, and the screen goes back to the dialer.
+class _EndedScreen extends StatelessWidget {
+  const _EndedScreen({this.call});
+
+  final CallSession? call;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final reason = _reasonLabel(call?.endReason);
+    final remote = call?.remote;
+    return Scaffold(
+      backgroundColor: scheme.surface,
+      body: SafeArea(
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 88,
+                height: 88,
+                decoration: BoxDecoration(color: scheme.errorContainer, shape: BoxShape.circle),
+                child: Icon(Icons.call_end, size: 40, color: scheme.error),
+              ),
+              const SizedBox(height: 20),
+              Text('通话已结束', style: Theme.of(context).textTheme.headlineSmall),
+              const SizedBox(height: 8),
+              Text(reason,
+                  style: TextStyle(fontSize: 14, color: scheme.onSurfaceVariant)),
+              if (remote != null && remote.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(remote,
+                    style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static String _reasonLabel(String? reason) => switch (reason ?? '') {
+        'local_hangup' => '已挂断',
+        'remote_hangup' => '对方挂断',
+        'rejected' => '已拒接',
+        'busy' => '对方忙',
+        'no_answer' => '无应答',
+        'no_carrier' => '未接通',
+        'no_dialtone' => '无拨号音',
+        'timeout' => '超时',
+        'error' => '失败',
+        _ => '线路已释放',
+      };
+}
+
+/// Recording status that doubles as the entry point to the controls.
+class _RecordingPill extends StatelessWidget {
+  const _RecordingPill({required this.recording, required this.live, required this.onTap});
+
+  final CallRecording? recording;
+  final bool live;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final rec = recording;
+    final IconData icon;
+    final String label;
+    final Color background;
+    final Color foreground;
+    if (rec == null) {
+      icon = Icons.mic_none;
+      label = '录音';
+      background = scheme.surfaceContainerHighest;
+      foreground = scheme.onSurfaceVariant;
+    } else if (rec.recording) {
+      icon = Icons.fiber_manual_record;
+      label = rec.announced ? '正在录音 · 已告知对方' : '正在录音';
+      background = scheme.errorContainer;
+      foreground = scheme.error;
+    } else if (rec.blocked) {
+      icon = Icons.mic_off_outlined;
+      label = '后台已关闭录音';
+      background = scheme.surfaceContainerHighest;
+      foreground = scheme.onSurfaceVariant;
+    } else if (rec.failedReason != null) {
+      icon = Icons.error_outline;
+      label = '录音不可用';
+      background = scheme.tertiaryContainer;
+      foreground = scheme.onTertiaryContainer;
+    } else {
+      icon = Icons.mic_none;
+      label = live ? '开始录音' : '接通后可录音';
+      background = scheme.surfaceContainerHighest;
+      foreground = scheme.onSurfaceVariant;
+    }
+    return Material(
+      color: background,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14, color: foreground),
+              const SizedBox(width: 6),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 12, color: foreground, fontWeight: FontWeight.w600)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Start or stop capturing this call, and decide whether the far end is told.
+///
+/// Whether the switch responds comes from the server policy. A forced policy
+/// cannot be turned off from a phone and a disabled one cannot be turned on, so
+/// the sheet explains that instead of letting the tap fail quietly.
+class _RecordingSheet extends StatefulWidget {
+  const _RecordingSheet({required this.callId});
+
+  final String callId;
+
+  @override
+  State<_RecordingSheet> createState() => _RecordingSheetState();
+}
+
+class _RecordingSheetState extends State<_RecordingSheet> {
+  bool _busy = false;
+  bool _announce = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final scope = context.read<AppScope>();
+    _announce = scope.calls.recordingFor(widget.callId)?.announce ?? false;
+    unawaited(scope.calls.refreshRecording(widget.callId));
+  }
+
+  Future<void> _toggle(AppScope scope, bool enabled) async {
+    setState(() => _busy = true);
+    final ok = await scope.calls.setRecording(widget.callId, enabled, announce: _announce);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok
+          ? (enabled ? '已开始录音' : '已停止录音，文件已保存')
+          : '操作失败: ' + (scope.calls.error ?? '未知错误')),
+    ));
+  }
+
+  Future<void> _announceNow(AppScope scope) async {
+    setState(() => _busy = true);
+    final ok = await scope.calls.announceRecording(widget.callId);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok ? '已向对方播报录音提示' : '播报失败: ' + (scope.calls.error ?? '未知错误')),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = context.watch<AppScope>();
+    final rec = scope.calls.recordingFor(widget.callId);
+    final scheme = Theme.of(context).colorScheme;
+    final canChange = rec?.canChange ?? false;
+    final recording = rec?.recording ?? false;
+    final noticeText = rec?.noticeText;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('通话录音', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 6),
+            Text(
+              rec == null
+                  ? '正在读取录音状态…'
+                  : (recording ? '这通电话正在录音' : '这通电话当前没有录音') +
+                      ' · ' +
+                      rec.policyLabel,
+              style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
+            ),
+            if (rec != null && rec.reasonLabel.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(rec.reasonLabel,
+                  style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+            ],
+            if (rec != null && rec.failedLabel.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: scheme.errorContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text('录音未能开始：' + rec.failedLabel,
+                    style: TextStyle(fontSize: 12, color: scheme.onErrorContainer)),
+              ),
+            ],
+            const SizedBox(height: 10),
+            if (canChange) ...[
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                value: recording,
+                onChanged: _busy ? null : (v) => _toggle(scope, v),
+                title: const Text('录音'),
+                subtitle: const Text('开启后服务器保存这通电话的音频，可在后台通话记录里播放'),
+              ),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: _announce,
+                onChanged: _busy ? null : (v) => setState(() => _announce = v ?? false),
+                title: const Text('开启时告知对方'),
+                subtitle: const Text('向通话里播放一句录音提示，对方能听到'),
+              ),
+              const SizedBox(height: 6),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.campaign_outlined),
+                label: const Text('立即播报录音提示'),
+                onPressed: _busy || !recording ? null : () => _announceNow(scope),
+              ),
+            ] else ...[
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  (rec?.blocked ?? false)
+                      ? '后台的录音策略是「不录音」，这通电话不能开启录音。要改动请到后台的通话策略里调整。'
+                      : '后台的录音策略是「强制录音」，这通电话全程录音，不能在这里关闭。',
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
+            ],
+            if (noticeText != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: rec?.noticeOk == true
+                      ? scheme.primaryContainer
+                      : scheme.errorContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      rec?.noticeOk == true ? '已告知对方' : '提示未成功播放',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: rec?.noticeOk == true
+                            ? scheme.onPrimaryContainer
+                            : scheme.onErrorContainer,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text('「' + noticeText + '」',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: rec?.noticeOk == true
+                                ? scheme.onPrimaryContainer
+                                : scheme.onErrorContainer)),
+                    if (rec?.noticeError != null && rec!.noticeError!.isNotEmpty)
+                      Text(rec.noticeError!,
+                          style: TextStyle(
+                              fontSize: 11, color: scheme.onErrorContainer)),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 10),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

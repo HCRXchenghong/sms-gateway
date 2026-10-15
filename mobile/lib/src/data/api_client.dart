@@ -442,6 +442,31 @@ class ApiClient {
   Future<dynamic> stopSpeak(int deviceId) =>
       post('/app/voice/' + deviceId.toString() + '/tts/stop');
 
+  /// Authoritative state of one call, live or already finished. Used when a
+  /// call vanishes from the live list and the screen has to say why it ended.
+  Future<Map<String, dynamic>> callDetail(String callId) async =>
+      await get('/app/voice/calls/' + callId) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> recordingState(String callId) async =>
+      await get(
+        '/app/voice/calls/' + callId + '/recording/state',
+      ) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> setRecording(
+    String callId,
+    bool enabled, {
+    bool? announce,
+  }) async =>
+      await post(
+        '/app/voice/calls/' + callId + '/recording',
+        body: {'enabled': enabled, if (announce != null) 'announce': announce},
+      ) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> announceRecording(String callId) async =>
+      await post(
+        '/app/voice/calls/' + callId + '/recording/announce',
+      ) as Map<String, dynamic>;
+
   Future<List<CallRecord>> callHistory({
     int limit = 50,
     int? deviceId,

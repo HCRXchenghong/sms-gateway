@@ -132,6 +132,7 @@ class CallsController extends BaseController {
   List<CallRecord> _history = [];
   bool _voiceEnabled = true;
   int _maxConcurrent = 4;
+  final Map<String, CallRecording> _recording = {};
 
   /// Set while a prompt such as "正在接通，请稍候" should be shown.
   String? _notice;
@@ -142,6 +143,12 @@ class CallsController extends BaseController {
   bool get voiceEnabled => _voiceEnabled;
   int get maxConcurrent => _maxConcurrent;
   bool get hasActive => _active.isNotEmpty;
+
+  /// Recording state per call id, fed by /app/voice/state, the call.recording
+  /// websocket event and the per-call recording status endpoint.
+  CallRecording? recordingFor(String callId) => _recording[callId];
+
+  bool isRecording(String callId) => _recording[callId]?.recording ?? false;
 
   CallSession? forDevice(int? deviceId) {
     if (deviceId == null) return null;
@@ -174,15 +181,125 @@ class CallsController extends BaseController {
       registry.update(s);
     }
     _active = sessions;
+    _syncRecording(state, sessions);
+    // Anything the gateway no longer lists as live is over. Relying on the
+    // call.ended frame alone left the in-call screen stuck on the last state
+    // it saw whenever that frame was missed, which is exactly what happens
+    // when the far end hangs up while the socket is reconnecting.
+    final liveIds = sessions.map((s) => s.callId).toSet();
+    var reconciled = false;
+    for (final id in registry.liveIds()) {
+      if (liveIds.contains(id)) continue;
+      if (registry.markEnded(id)) reconciled = true;
+    }
+    if (reconciled) {
+      _notice = null;
+      unawaited(refreshHistory());
+    }
     notifyListeners();
     return null;
   });
 
+  void _syncRecording(Map<String, dynamic> state, List<CallSession> sessions) {
+    final snapshot = state['recording'];
+    final seen = <String>{};
+    if (snapshot is List) {
+      for (final entry in snapshot) {
+        if (entry is! Map) continue;
+        final map = Map<String, dynamic>.from(entry);
+        final id = (map['call_id'] ?? '').toString();
+        if (id.isEmpty) continue;
+        seen.add(id);
+        _recording[id] = CallRecording.fromJson(id, map, fallback: _recording[id]);
+      }
+    }
+    for (final s in sessions) {
+      if (seen.contains(s.callId)) continue;
+      final previous = _recording[s.callId];
+      _recording[s.callId] =
+          (previous ?? CallRecording(callId: s.callId)).copyWith(recording: false);
+    }
+  }
+
   Future<void> refreshHistory({int limit = 50}) => guard(() async {
     _history = await api.callHistory(limit: limit);
+    var changed = false;
+    for (final record in _history) {
+      // The CDR row is only written with state=ended once the call is really
+      // over, so it outranks a live entry left behind by a missed frame and
+      // supplies the end reason the live list cannot.
+      if (!record.isEnded) continue;
+      final known = registry[record.callId];
+      if (known == null || known.isEnded) {
+        registry.update(record);
+      } else if (registry.markEnded(
+        record.callId,
+        endReason: record.endReason,
+        endedAt: record.endedAt,
+      )) {
+        changed = true;
+      }
+    }
+    if (changed) _notice = null;
     notifyListeners();
     return null;
   }, setBusy: false);
+
+  /// Ask the gateway what happened to one call. Called when a call the screen
+  /// is showing drops off the live list, so it can close with a reason instead
+  /// of an unexplained jump back to the dialer.
+  Future<void> fetchCallDetail(String callId) => guard(() async {
+    final data = await api.callDetail(callId);
+    final raw = data['call'];
+    if (raw is Map) {
+      final session = CallSession.fromJson(Map<String, dynamic>.from(raw));
+      registry.update(session);
+      if (session.isEnded) _notice = null;
+      notifyListeners();
+    }
+    return null;
+  }, setBusy: false);
+
+  Future<CallRecording?> refreshRecording(String callId) => guard(() async {
+    final data = await api.recordingState(callId);
+    final recording =
+        CallRecording.fromJson(callId, data, fallback: _recording[callId]);
+    _recording[callId] = recording;
+    notifyListeners();
+    return recording;
+  }, setBusy: false);
+
+  /// Start or stop capturing this call. Returns false when the policy refuses
+  /// or the call is gone; [error] carries the reason for the snackbar.
+  Future<bool> setRecording(String callId, bool enabled, {bool? announce}) async {
+    final data = await guard(
+      () => api.setRecording(callId, enabled, announce: announce),
+      setBusy: false,
+    );
+    _absorbRecordingResult(callId, data);
+    return data != null;
+  }
+
+  /// Tell the far end, mid-call, that the conversation is being recorded.
+  Future<bool> announceRecording(String callId) async {
+    final data = await guard(() => api.announceRecording(callId), setBusy: false);
+    _absorbRecordingResult(callId, data);
+    return data != null;
+  }
+
+  void _absorbRecordingResult(String callId, Object? data) {
+    if (data is Map) {
+      final status = data['status'];
+      if (status is Map) {
+        _recording[callId] = CallRecording.fromJson(
+          callId,
+          Map<String, dynamic>.from(status),
+          fallback: _recording[callId],
+        );
+      }
+    }
+    notifyListeners();
+  }
 
   void unavailableDevice(String? label) =>
       fail(label == null ? '没有可用设备' : '$label 已离线，请切换在线设备');
@@ -276,7 +393,17 @@ class CallsController extends BaseController {
         notifyListeners();
         break;
       case 'call.recording':
-        unawaited(refreshHistory());
+        final id = (event.data['call_id'] ?? '').toString();
+        if (id.isNotEmpty) {
+          _recording[id] =
+              CallRecording.fromJson(id, event.data, fallback: _recording[id]);
+        }
+        notifyListeners();
+        // Only a finished capture changes the stored file the log points at.
+        final phase = event.data['phase']?.toString();
+        if (phase == 'stopped' || phase == 'empty') {
+          unawaited(refreshHistory());
+        }
         break;
       case 'call.tts':
         notifyListeners();
